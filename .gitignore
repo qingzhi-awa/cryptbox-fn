@@ -1,0 +1,12 @@
+# 飞牛应用打包目录（仅打包用，不含源码）
+fnos-server/cryptbox/
+fnos-server/cryptbox-en/
+
+# 编译与打包产物
+fnos-server/fnos-server.exe
+fnos-server/*.fpk
+fnos-server/web/
+
+# 前端依赖
+shared/web/node_modules/
+
