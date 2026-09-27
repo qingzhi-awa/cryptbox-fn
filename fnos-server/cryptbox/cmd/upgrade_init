@@ -1,0 +1,38 @@
+#!/bin/bash
+
+### This script is called before the user upgrades the application.
+### 升级前备份用户数据（var 目录在升级时由系统保留，此处额外做一份快照以防万一）。
+
+DB_FILE="${TRIM_PKGVAR}/app.db"
+
+# 无数据目录或数据库文件时无需备份
+if [ -z "${TRIM_PKGVAR}" ] || [ ! -f "${DB_FILE}" ]; then
+    exit 0
+fi
+
+BACKUP_DIR="${TRIM_PKGVAR}/backups"
+mkdir -p "${BACKUP_DIR}" 2>/dev/null
+if [ ! -d "${BACKUP_DIR}" ]; then
+    echo "备份目录创建失败" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+fi
+
+STAMP=$(date +%Y%m%d%H%M%S)
+BAK_FILE="${BACKUP_DIR}/app.db.${TRIM_OLD_APPVER:-pre}.${STAMP}.bak"
+
+# 优先用 sqlite3 在线安全备份（应用未停止时也能得到一致快照），失败或无 sqlite3 则回退 cp。
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "${DB_FILE}" ".backup ${BAK_FILE}" 2>/dev/null
+fi
+if [ ! -f "${BAK_FILE}" ]; then
+    cp -f "${DB_FILE}" "${BAK_FILE}" 2>/dev/null
+fi
+if [ ! -f "${BAK_FILE}" ]; then
+    echo "升级前数据备份失败" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+fi
+
+# 只保留最近 3 份备份
+ls -1t "${BACKUP_DIR}"/app.db.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f 2>/dev/null
+
+exit 0

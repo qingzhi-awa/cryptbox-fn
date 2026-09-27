@@ -1,0 +1,35 @@
+#!/bin/bash
+
+### This script is called after the user installs the application.
+### 把安装向导里设置的管理员账号与 SMTP 配置写入初始化文件，供服务端启动时初始化。
+
+mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+# 让重置密码脚本可执行（位于 target 目录，供管理员 SSH 登录后直接运行）
+chmod +x "${TRIM_APPDEST}/reset-password.sh" 2>/dev/null
+
+# 管理员账号
+USERNAME="${wizard_admin_username:-}"
+PASSWORD="${wizard_admin_password:-}"
+if [ -n "${USERNAME}" ] && [ -n "${PASSWORD}" ]; then
+    SETUP_FILE="${TRIM_PKGVAR}/setup.conf"
+    # 首行用户名、次行密码；密码保留原样（不转义、不去空格）
+    printf '%s\n%s\n' "${USERNAME}" "${PASSWORD}" > "${SETUP_FILE}"
+    chmod 600 "${SETUP_FILE}" 2>/dev/null
+fi
+
+# SMTP 配置（可选，host 为空则跳过）
+SMTP_HOST="${wizard_smtp_host:-}"
+if [ -n "${SMTP_HOST}" ]; then
+    SMTP_FILE="${TRIM_PKGVAR}/smtp.conf"
+    # 5 行：host / port / username / password / ssl
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "${SMTP_HOST}" \
+        "${wizard_smtp_port:-465}" \
+        "${wizard_smtp_username:-}" \
+        "${wizard_smtp_password:-}" \
+        "${wizard_smtp_ssl:-true}" > "${SMTP_FILE}"
+    chmod 600 "${SMTP_FILE}" 2>/dev/null
+fi
+
+exit 0

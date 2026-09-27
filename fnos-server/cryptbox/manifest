@@ -1,0 +1,15 @@
+appname               = cryptbox
+version               = 0.2.3
+display_name          = CryPtBox密匣
+desc                  = 密匣 CryPtBox 这是一个本地优先、跨平台、可选云同步的密码管理器，客户端与服务端共同开源。
+platform              = x86
+source                = thirdparty
+maintainer            = CryPtBox
+maintainer_url        = https://cryptbox.fnosp.com
+distributor           = 青芷
+distributor_url       = https://07qingzhi.cn
+service_port          = 5201
+checkport             = true
+desktop_uidir         = ui
+desktop_applaunchname = cryptbox.Application
+changelog             = ✅ 1. 修复登录问题\n【登录】修复密码错误提示异常的问题，提示信息更准确\n【登录】解决登录成功后无法正常加载用户信息、同步按钮失效的BUG\n✅ 2. 优化删除操作\n替换原生提示框，全系使用内置自定义确认弹窗，操作更安全、统一，有效防止误操作\n✅ 3. 新增【回收站】核心功能\n【回收站】删除数据改为软删除，保留完整数据，支持误删恢复\n【回收站】支持回收站列表查看、单条恢复、彻底删除、一键清空\n【回收站】内置自动清理机制，自动清除过期回收数据\n【回收站】支持开关回收站功能、自定义数据保留时长（默认保留30天）\n【回收站】支持用户个人设置、服务端管理员全局配置\n✅ 4. 完善多语言适配\n【语言】修复客户端、飞牛端多语言文案覆盖不全的BUG
