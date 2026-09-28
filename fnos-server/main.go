@@ -82,14 +82,14 @@ func main() {
 
 	handler := web.Serve(r)
 
-	// TCP 监听：客户端局域网同步与飞牛端 Web 访问共用。认证统一走登录页 JWT，不使用网关头。
+	// TCP 监听：客户端局域网同步用。剥离网关鉴权头，防止局域网内伪造 X-Trim 头越权。
 	tcpLn, err := net.Listen("tcp", ":"+cfg.Port)
 	if err != nil {
 		log.Fatalf("TCP 监听失败: %v", err)
 	}
 	log.Printf("密匣服务已启动: http://localhost:%s", cfg.Port)
 	go func() {
-		if err := http.Serve(tcpLn, handler); err != nil {
+		if err := http.Serve(tcpLn, stripGatewayHeaders(handler)); err != nil {
 			log.Fatalf("TCP 服务退出: %v", err)
 		}
 	}()
@@ -115,6 +115,17 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("收到退出信号，正在关闭...")
+}
+
+// stripGatewayHeaders 剥离网关转发的鉴权头。统一网关的 X-Trim 头只在 app.sock 上可信，
+// TCP 端口（局域网同步）直接暴露，必须剥离，否则可伪造 X-Trim-Username 越权。
+func stripGatewayHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del("X-Trim-Username")
+		r.Header.Del("X-Trim-Isadmin")
+		r.Header.Del("X-Trim-Userid")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // migrateLegacyDB 将旧版本数据库文件名 passbook.db 迁移为 app.db（仅当新库不存在且旧库存在时）。

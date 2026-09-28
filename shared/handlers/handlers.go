@@ -111,13 +111,48 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 仅支持登录页主动登录（Bearer token）。不使用飞牛网关 X-Trim 头或 Cookie 自动登录，
-		// 确保密码库必须通过 cryptbox 密码二次认证，飞牛系统登录本身不足以解锁密码库。
+		// 1. JWT 优先：用户在登录页主动登录（携带 Bearer token）时，身份以 token 为准。
+		//    飞牛网关的 X-Trim 头表示飞牛系统当前登录用户，若优先于 JWT，会导致
+		//    「登录 test 却变成 admin」；因此主动登录的 JWT 优先于网关 SSO。
 		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, strings.TrimPrefix(h, "Bearer ")); err == nil {
 				var role, status string
 				if err := s.DB.QueryRow(`SELECT role, status FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status); err == nil && status == "active" {
 					claims.Role = role
+					c.Set("claims", claims)
+					c.Next()
+					return
+				}
+			}
+		}
+
+		// 2. 网关身份：飞牛内嵌访问（无主动登录 token）时，使用飞牛网关转发的 X-Trim 鉴权头自动登录。
+		if gwUser := strings.TrimSpace(c.GetHeader("X-Trim-Username")); gwUser != "" {
+			var id int64
+			var role, status string
+			if err := s.DB.QueryRow(`SELECT id, role, status FROM users WHERE username = ?`, gwUser).Scan(&id, &role, &status); err == nil && status == "active" {
+				// 网关用 X-Trim-Isadmin 标识当前 NAS 用户是否为管理员；内嵌访问时据此授予管理员权限。
+				if role == "user" && strings.EqualFold(c.GetHeader("X-Trim-Isadmin"), "true") {
+					role = "admin"
+				}
+				claims := &auth.Claims{UserID: id, Username: gwUser, Role: role}
+				// 下发 HttpOnly Cookie：网关刷新时 X-Trim 可能缺失，靠 Cookie 维持登录态。
+				if token, err := auth.GenerateToken(s.Cfg.JWTSecret, id, gwUser, role); err == nil {
+					c.SetCookie("cryptbox_token", token, 7*24*3600, "/", "", false, true)
+				}
+				c.Set("claims", claims)
+				c.Next()
+				return
+			}
+		}
+
+		// 3. Cookie 回退：网关刷新后 X-Trim 未转发时，用登录时下发的 Cookie。
+		// 注意：保留 Cookie 中的角色（含网关鉴权时 X-Trim-Isadmin 的管理员提升），
+		// 仅重新校验账号仍为 active，否则刷新后管理员权限会丢失。
+		if cookieToken, err := c.Cookie("cryptbox_token"); err == nil && cookieToken != "" {
+			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, cookieToken); err == nil {
+				var status string
+				if err := s.DB.QueryRow(`SELECT status FROM users WHERE id = ?`, claims.UserID).Scan(&status); err == nil && status == "active" {
 					c.Set("claims", claims)
 					c.Next()
 					return
