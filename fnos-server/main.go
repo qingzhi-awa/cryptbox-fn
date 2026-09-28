@@ -257,6 +257,10 @@ func setupSMTPFromInstall(database *sql.DB, cfg config.Config) error {
 	if err := db.SetMeta(database, "smtp_username", username); err != nil {
 		return err
 	}
+	// 发件人地址：安装向导只收集「邮箱账号」，发件地址与账号一致。
+	if err := db.SetMeta(database, "smtp_from", username); err != nil {
+		return err
+	}
 	if password != "" {
 		if err := db.SetMeta(database, "smtp_password", password); err != nil {
 			return err
