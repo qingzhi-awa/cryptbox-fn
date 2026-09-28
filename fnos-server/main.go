@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -45,6 +46,24 @@ func main() {
 			log.Fatalf("重置密码失败: %v", err)
 		}
 		log.Println("超级管理员密码已重置")
+		return
+	}
+
+	// CLI 模式：发送测试邮件验证 SMTP 配置后退出（供安装向导校验 SMTP）。
+	if len(os.Args) > 1 && os.Args[1] == "-test-smtp" {
+		if len(os.Args) < 8 {
+			log.Fatalf("用法: %s -test-smtp <host> <port> <username> <password> <ssl> <to>", os.Args[0])
+		}
+		host := os.Args[2]
+		port, _ := strconv.Atoi(os.Args[3])
+		username := os.Args[4]
+		password := os.Args[5]
+		ssl := os.Args[6] == "true"
+		to := os.Args[7]
+		if err := auth.TestSMTP(host, port, username, password, ssl, to); err != nil {
+			log.Fatalf("测试邮件发送失败: %v", err)
+		}
+		log.Println("测试邮件已发送")
 		return
 	}
 

@@ -2,4 +2,35 @@
 
 ### This script is called before the user installs the application.
 
+# 必须勾选使用条款
+if [ "${wizard_agree:-}" != "agree" ]; then
+    echo "请先同意使用条款" >&2
+    exit 1
+fi
+
+# 若配置了 SMTP，则发送测试邮件验证配置；失败则中止安装
+SMTP_VENDOR="${wizard_smtp_vendor:-}"
+SMTP_USERNAME="${wizard_smtp_username:-}"
+if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
+    case "${SMTP_VENDOR}" in
+        qq)      SMTP_HOST="smtp.qq.com";        SMTP_PORT="465"; SMTP_SSL="true" ;;
+        126)     SMTP_HOST="smtp.126.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        163)     SMTP_HOST="smtp.163.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        gmail)   SMTP_HOST="smtp.gmail.com";     SMTP_PORT="587"; SMTP_SSL="false" ;;
+        outlook) SMTP_HOST="smtp.office365.com"; SMTP_PORT="587"; SMTP_SSL="false" ;;
+        custom)  SMTP_HOST="${wizard_smtp_host:-}"; SMTP_PORT="465"; SMTP_SSL="true" ;;
+        *)       SMTP_HOST="" ;;
+    esac
+    if [ -n "${SMTP_HOST}" ]; then
+        BIN="${TRIM_APPDEST}/cryptbox-server"
+        [ -x "${BIN}" ] || BIN="${TRIM_APPDEST}/cryptbox-server-arm64"
+        if [ -x "${BIN}" ]; then
+            if ! "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${wizard_smtp_password:-}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
+                echo "SMTP 测试邮件发送失败，请返回上一步检查配置" >&2
+                exit 1
+            fi
+        fi
+    fi
+fi
+
 exit 0

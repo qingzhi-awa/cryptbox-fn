@@ -121,7 +121,11 @@ func ValidatePassword(database *sql.DB, password string) error {
 
 // sendMail 发送邮件（通用，contentType 为 text/plain 或 text/html）。
 func sendMail(database *sql.DB, to, subject, contentType, body string) error {
-	cfg := LoadSMTPConfig(database)
+	return sendMailWithConfig(LoadSMTPConfig(database), to, subject, contentType, body)
+}
+
+// sendMailWithConfig 使用给定的 SMTP 配置发送邮件。
+func sendMailWithConfig(cfg SMTPConfig, to, subject, contentType, body string) error {
 	if cfg.Host == "" || cfg.Port == 0 {
 		return errors.New("SMTP 未配置")
 	}
@@ -175,6 +179,12 @@ func sendMail(database *sql.DB, to, subject, contentType, body string) error {
 		return c.Quit()
 	}
 	return smtp.SendMail(addr, auth, from, []string{to}, msg)
+}
+
+// TestSMTP 使用显式 SMTP 参数发送一封测试邮件（供安装向导校验 SMTP 配置）。
+func TestSMTP(host string, port int, username, password string, ssl bool, to string) error {
+	cfg := SMTPConfig{Host: host, Port: port, Username: username, Password: password, SSL: ssl}
+	return sendMailWithConfig(cfg, to, "密匣 CryPtBox 测试邮件", "text/html; charset=UTF-8", TestEmailHTML())
 }
 
 // SendEmail 发送纯文本邮件。
