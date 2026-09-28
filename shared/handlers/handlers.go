@@ -111,9 +111,8 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. JWT 优先：用户在登录页主动登录（携带 Bearer token）时，身份以 token 为准。
-		//    飞牛网关的 X-Trim 头表示飞牛系统当前登录用户，若优先于 JWT，会导致
-		//    「登录 test 却变成 admin」；因此主动登录的 JWT 优先于网关 SSO。
+		// 仅支持登录页主动登录（Bearer token）。不使用飞牛网关 X-Trim 头做强制验证，
+		// 用户身份完全由自定义的账号密码（JWT）决定。
 		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, strings.TrimPrefix(h, "Bearer ")); err == nil {
 				var role, status string
@@ -123,22 +122,6 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 					c.Next()
 					return
 				}
-			}
-		}
-
-		// 2. 网关身份：飞牛内嵌访问（无主动登录 token）时，使用飞牛网关转发的 X-Trim 鉴权头自动登录。
-		if gwUser := strings.TrimSpace(c.GetHeader("X-Trim-Username")); gwUser != "" {
-			var id int64
-			var role, status string
-			if err := s.DB.QueryRow(`SELECT id, role, status FROM users WHERE username = ?`, gwUser).Scan(&id, &role, &status); err == nil && status == "active" {
-				// 网关用 X-Trim-Isadmin 标识当前 NAS 用户是否为管理员；内嵌访问时据此授予管理员权限。
-				if role == "user" && strings.EqualFold(c.GetHeader("X-Trim-Isadmin"), "true") {
-					role = "admin"
-				}
-				claims := &auth.Claims{UserID: id, Username: gwUser, Role: role}
-				c.Set("claims", claims)
-				c.Next()
-				return
 			}
 		}
 
