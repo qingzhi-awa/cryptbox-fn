@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: 'Import Template' },
-  login: { username: 'Username', usernameOrEmail: 'Username / Email', password: 'Password', submit: 'Login', adminTitle: 'Admin Login', adminOnly: 'This account has no admin permission', setupTitle: 'Setup Admin Account', setupHint: 'First use, please set up admin account and password', setupSubmit: 'Create Admin & Enter', register: 'Register', toRegister: 'Register', forgot: 'Forgot password?', back: 'Back to login', code: 'Verification code', sendCode: 'Send code', newPassword: 'New password', resetSubmit: 'Reset password', registerClosed: 'Registration is closed, please contact the administrator' },
+  login: { username: 'Username', usernameOrEmail: 'Username / Email', password: 'Password', submit: 'Login', adminTitle: 'Admin Login', adminOnly: 'This account has no admin permission', setupTitle: 'Setup Admin Account', setupHint: 'First use, please set up admin account and password', setupSubmit: 'Create Admin & Enter', register: 'Register', toRegister: 'Register', forgot: 'Forgot password?', back: 'Back to login', code: 'Verification code', sendCode: 'Send code', newPassword: 'New password', resetSubmit: 'Reset password', registerClosed: 'Registration is closed, please contact the administrator', gatewayUser: 'Current fnOS user' },
   role: { admin: 'Admin', user: 'User', superadmin: 'Super Admin' },
   header: { logout: 'Logout', lock: 'Lock' },
   tabs: { passwords: 'My Passwords', trash: 'Recycle Bin', users: 'User Management', logs: 'Operation Logs', settings: 'System Settings' },

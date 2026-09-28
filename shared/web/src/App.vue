@@ -24,6 +24,7 @@
       </template>
 
       <template v-else-if="gateMode === 'login'">
+        <p v-if="gatewayUser" class="sub">{{ $t('login.gatewayUser') }}：{{ gatewayUser }}</p>
         <input v-model="loginForm.username" :placeholder="$t('login.usernameOrEmail')" @keyup.enter="login" />
         <input v-model="loginForm.password" type="password" :placeholder="$t('login.password')" @keyup.enter="login" />
         <button class="btn-primary" @click="login">{{ $t('login.submit') }}</button>
@@ -516,6 +517,7 @@ export default {
       avatarVersion: 0,
       userError: '',
       loginForm: { username: '', password: '' },
+      gatewayUser: '',
       setupForm: { username: '', password: '' },
       isAdminLogin: location.pathname.startsWith('/admin-login'),
       gateMode: 'login',
@@ -661,6 +663,8 @@ export default {
           this.$i18n.locale = r.default_language
         }
         if (r.site) this.site = this.normalizeSite(r.site)
+        const g = await api.gatewayUser()
+        this.gatewayUser = (g && g.username) || ''
       } catch (e) {
         /* ignore */
       }
