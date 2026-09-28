@@ -34,13 +34,14 @@ if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
     esac
     if [ -n "${SMTP_HOST}" ]; then
         SMTP_FILE="${TRIM_PKGVAR}/smtp.conf"
-        # 5 行：host / port / username / password / ssl
-        printf '%s\n%s\n%s\n%s\n%s\n' \
+        # 6 行：host / port / username / password / ssl / vendor
+        printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
             "${SMTP_HOST}" \
             "${SMTP_PORT}" \
             "${SMTP_USERNAME}" \
             "${wizard_smtp_password:-}" \
-            "${SMTP_SSL}" > "${SMTP_FILE}"
+            "${SMTP_SSL}" \
+            "${SMTP_VENDOR}" > "${SMTP_FILE}"
         chmod 600 "${SMTP_FILE}" 2>/dev/null
     fi
 fi

@@ -237,13 +237,18 @@ func setupSMTPFromInstall(database *sql.DB, cfg config.Config) error {
 	username := strings.TrimSpace(lines[2])
 	password := lines[3] // 密码保留原样
 	ssl := strings.TrimSpace(lines[4])
+	vendor := "custom"
+	if len(lines) >= 6 {
+		if v := strings.TrimSpace(lines[5]); v != "" {
+			vendor = v
+		}
+	}
 
 	if err := db.SetMeta(database, "smtp_host", host); err != nil {
 		return err
 	}
-	// 安装向导收集的是自定义 SMTP 服务器信息，标记为 custom，
-	// 避免前端按预设厂商（默认 qq）只展示邮箱/授权码，导致 host/port/username 被隐藏。
-	if err := db.SetMeta(database, "smtp_vendor", "custom"); err != nil {
+	// vendor：优先使用安装向导选择的服务商；旧版本未写入时回退 custom。
+	if err := db.SetMeta(database, "smtp_vendor", vendor); err != nil {
 		return err
 	}
 	if err := db.SetMeta(database, "smtp_port", port); err != nil {
