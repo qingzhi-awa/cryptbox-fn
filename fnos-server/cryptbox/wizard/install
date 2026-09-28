@@ -82,19 +82,8 @@
                     { "label": "126邮箱", "value": "126" },
                     { "label": "163邮箱", "value": "163" },
                     { "label": "Gmail", "value": "gmail" },
-                    { "label": "Outlook", "value": "outlook" },
-                    { "label": "自定义", "value": "custom" }
+                    { "label": "Outlook", "value": "outlook" }
                 ]
-            },
-            {
-                "type": "text",
-                "field": "wizard_smtp_host",
-                "label": "SMTP 服务器地址（仅「自定义」时填写）"
-            },
-            {
-                "type": "text",
-                "field": "wizard_smtp_port",
-                "label": "端口（仅「自定义」时填写）"
             },
             {
                 "type": "text",
@@ -105,12 +94,6 @@
                 "type": "password",
                 "field": "wizard_smtp_password",
                 "label": "邮箱密码/授权码"
-            },
-            {
-                "type": "switch",
-                "field": "wizard_smtp_ssl",
-                "label": "使用 SSL（仅「自定义」时设置）",
-                "initValue": "true"
             }
         ]
     }
