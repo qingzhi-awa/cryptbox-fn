@@ -88,11 +88,6 @@
             },
             {
                 "type": "text",
-                "field": "wizard_smtp_host",
-                "label": "SMTP 服务器地址（仅「自定义」时填写）"
-            },
-            {
-                "type": "text",
                 "field": "wizard_smtp_username",
                 "label": "邮箱账号"
             },
