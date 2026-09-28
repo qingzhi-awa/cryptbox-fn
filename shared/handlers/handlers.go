@@ -53,7 +53,6 @@ func (s *Server) register(r *gin.Engine) {
 		api.POST("/register", s.handleRegister)
 		api.POST("/register/send-code", s.handleSendRegisterCode)
 		api.GET("/settings/public", s.handlePublicSettings)
-		api.GET("/gateway-user", s.handleGatewayUser)
 		api.POST("/login", s.handleLogin)
 		api.POST("/reset/send-code", s.handleSendResetCode)
 		api.POST("/reset", s.handleResetPassword)
@@ -112,8 +111,9 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 仅支持登录页主动登录（Bearer token）。飞牛网关注入的 X-Trim 头只用于
-		// 登录页提示当前飞牛用户（见 /api/gateway-user），不用于自动登录。
+		// 1. JWT 优先：用户在登录页主动登录（携带 Bearer token）时，身份以 token 为准。
+		//    飞牛网关的 X-Trim 头表示飞牛系统当前登录用户，若优先于 JWT，会导致
+		//    「登录 test 却变成 admin」；因此主动登录的 JWT 优先于网关 SSO。
 		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, strings.TrimPrefix(h, "Bearer ")); err == nil {
 				var role, status string
@@ -123,6 +123,22 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 					c.Next()
 					return
 				}
+			}
+		}
+
+		// 2. 网关身份：飞牛内嵌访问（无主动登录 token）时，使用飞牛网关转发的 X-Trim 鉴权头自动登录。
+		if gwUser := strings.TrimSpace(c.GetHeader("X-Trim-Username")); gwUser != "" {
+			var id int64
+			var role, status string
+			if err := s.DB.QueryRow(`SELECT id, role, status FROM users WHERE username = ?`, gwUser).Scan(&id, &role, &status); err == nil && status == "active" {
+				// 网关用 X-Trim-Isadmin 标识当前 NAS 用户是否为管理员；内嵌访问时据此授予管理员权限。
+				if role == "user" && strings.EqualFold(c.GetHeader("X-Trim-Isadmin"), "true") {
+					role = "admin"
+				}
+				claims := &auth.Claims{UserID: id, Username: gwUser, Role: role}
+				c.Set("claims", claims)
+				c.Next()
+				return
 			}
 		}
 
@@ -1219,14 +1235,6 @@ func (s *Server) handlePublicSettings(c *gin.Context) {
 		"password_require_complex": db.GetMeta(s.DB, "password_require_complex") == "true",
 		"default_language":         defaultLanguage(s.DB),
 		"site":                     db.LoadSiteConfig(s.DB),
-	})
-}
-
-// handleGatewayUser 返回飞牛网关注入的当前用户名（X-Trim-Username），仅供登录页
-// 提示「当前飞牛用户」用，不参与认证；直接端口访问无此头时返回空。
-func (s *Server) handleGatewayUser(c *gin.Context) {
-	writeJSON(c, http.StatusOK, gin.H{
-		"username": strings.TrimSpace(c.GetHeader("X-Trim-Username")),
 	})
 }
 

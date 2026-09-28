@@ -1,7 +1,7 @@
 export default {
   app: { title: '密匣' },
   file: { template: '导入模板' },
-  login: { username: '用户名', usernameOrEmail: '用户名 / 邮箱', password: '密码', submit: '登录', adminTitle: '管理员登录', adminOnly: '该账号无管理员权限', setupTitle: '设置管理员账号', setupHint: '首次使用，请设置管理员账号和密码', setupSubmit: '创建管理员并进入', register: '注册', toRegister: '注册账号', forgot: '忘记密码？', back: '返回登录', code: '邮箱验证码', sendCode: '发送验证码', newPassword: '新密码', resetSubmit: '重置密码', registerClosed: '注册未开放，请联系管理员', gatewayUser: '当前飞牛用户' },
+  login: { username: '用户名', usernameOrEmail: '用户名 / 邮箱', password: '密码', submit: '登录', adminTitle: '管理员登录', adminOnly: '该账号无管理员权限', setupTitle: '设置管理员账号', setupHint: '首次使用，请设置管理员账号和密码', setupSubmit: '创建管理员并进入', register: '注册', toRegister: '注册账号', forgot: '忘记密码？', back: '返回登录', code: '邮箱验证码', sendCode: '发送验证码', newPassword: '新密码', resetSubmit: '重置密码', registerClosed: '注册未开放，请联系管理员' },
   role: { admin: '管理员', user: '用户', superadmin: '超级管理员' },
   header: { logout: '退出', lock: '锁定' },
   tabs: { passwords: '我的密码', trash: '回收站', users: '用户管理', logs: '操作日志', settings: '系统设置' },

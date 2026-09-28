@@ -24,7 +24,6 @@ export default {
   login: (u, p) => request('POST', '/api/login', { username: u, password: p }),
   register: (data) => request('POST', '/api/register', data),
   publicSettings: () => request('GET', '/api/settings/public'),
-  gatewayUser: () => request('GET', '/api/gateway-user'),
   me: (t) => request('GET', '/api/me', undefined, t),
   updateMe: (data, t) => request('PUT', '/api/me', data, t),
   uploadAvatar: (data, t) => request('POST', '/api/me/avatar', data, t),
