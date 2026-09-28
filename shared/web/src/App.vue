@@ -100,8 +100,6 @@
       </nav>
 
       <div class="content">
-        <p v-if="error" class="error inline">{{ error }}</p>
-        <p v-if="msg" class="msg inline">{{ msg }}</p>
 
     <!-- 密码管理 -->
     <div v-if="tab === 'passwords'" class="panel">
@@ -110,7 +108,7 @@
           <input v-model="search" :placeholder="$t('toolbar.search')" />
           <button class="btn-primary" @click="startAdd">{{ $t('toolbar.add') }}</button>
         </div>
-        <div class="toolbar-sub">
+        <div class="toolbar-sub hide-mobile">
           <select v-model="ioFormat" class="btn-ghost menu-select" @change="onIO">
             <option value="" selected>{{ $t('toolbar.io') }}</option>
             <option value="import-csv">{{ $t('toolbar.import') }} CSV</option>
@@ -195,24 +193,13 @@
     <!-- 用户管理 -->
     <div v-if="tab === 'users'" class="panel">
       <div class="toolbar">
-        <div class="add-user">
-          <input v-model="newUser.username" :placeholder="$t('users.username')" />
-          <input v-model="newUser.email" :placeholder="$t('users.email')" />
-          <input v-model="newUser.password" type="password" :placeholder="$t('users.password')" />
-          <select v-model="newUser.role">
-            <option value="user">{{ $t('users.roleUser') }}</option>
-            <option value="admin">{{ $t('users.roleAdmin') }}</option>
-          </select>
-          <button class="btn-primary" @click="createUser">{{ $t('users.add') }}</button>
-        </div>
+        <button class="btn-primary" @click="openAddUser">{{ $t('users.add') }}</button>
         <div class="toolbar-sub">
-          <button class="btn-ghost" @click="$refs.userFileInput.click()">{{ $t('users.import') }}</button>
-          <button class="btn-ghost" @click="downloadUserTemplate">{{ $t('users.template') }}</button>
+          <button class="btn-ghost hide-mobile" @click="$refs.userFileInput.click()">{{ $t('users.import') }}</button>
+          <button class="btn-ghost hide-mobile" @click="downloadUserTemplate">{{ $t('users.template') }}</button>
           <input ref="userFileInput" type="file" accept=".csv,text/csv" style="display:none" @change="importUsersFile" />
         </div>
       </div>
-      <p v-if="userError" class="error inline">{{ userError }}</p>
-
       <div class="list">
         <div v-for="u in users" :key="u.id" class="row">
           <img v-if="u.avatar" :src="avatarUrl(u.id)" class="avatar" alt="" />
@@ -402,20 +389,25 @@
       <p v-if="site.footer_text" class="footer-line">{{ site.footer_text }}</p>
     </footer>
 
+    <!-- 全局提示 toast -->
+    <div v-if="error || msg" class="toast" :class="error ? 'toast-error' : 'toast-msg'">
+      {{ error || msg }}
+    </div>
+
     <!-- 新增/编辑密码弹窗 -->
     <div v-if="editing !== null" class="mask" @click.self="editing = null">
       <div class="modal">
         <h2>{{ form.id ? $t('modal.editTitle') : $t('modal.addTitle') }}</h2>
         <label>{{ $t('modal.title') }}</label>
         <input v-model="form.title" />
-        <label>{{ $t('modal.username') }}</label>
+        <label>{{ $t('modal.username') }} *</label>
         <input v-model="form.username" />
-        <label>{{ $t('modal.password') }}</label>
+        <label>{{ $t('modal.password') }} *</label>
         <div class="pw-row">
           <input v-model="form.password" :type="formShow ? 'text' : 'password'" />
           <button class="mini" @click="formShow = !formShow">{{ formShow ? $t('list.hide') : $t('list.show') }}</button>
         </div>
-        <label>{{ $t('modal.url') }}</label>
+        <label>{{ $t('modal.url') }} *</label>
         <input v-model="form.url" />
         <label>{{ $t('modal.category') }}</label>
         <input v-model="form.category" />
@@ -451,6 +443,29 @@
         <div class="modal-actions">
           <button class="btn-ghost" @click="editingUser = null">{{ $t('modal.cancel') }}</button>
           <button class="btn-primary" @click="saveUser">{{ $t('modal.save') }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新增用户弹窗 -->
+    <div v-if="showAddUser" class="mask" @click.self="showAddUser = false">
+      <div class="modal">
+        <h2>{{ $t('users.add') }}</h2>
+        <label>{{ $t('users.username') }}</label>
+        <input v-model="newUser.username" />
+        <label>{{ $t('users.email') }}</label>
+        <input v-model="newUser.email" />
+        <label>{{ $t('users.password') }}</label>
+        <input v-model="newUser.password" type="password" />
+        <label>{{ $t('users.role') }}</label>
+        <select v-model="newUser.role">
+          <option value="user">{{ $t('users.roleUser') }}</option>
+          <option value="admin">{{ $t('users.roleAdmin') }}</option>
+        </select>
+        <p v-if="userError" class="error">{{ userError }}</p>
+        <div class="modal-actions">
+          <button class="btn-ghost" @click="showAddUser = false">{{ $t('modal.cancel') }}</button>
+          <button class="btn-primary" @click="createUser">{{ $t('modal.save') }}</button>
         </div>
       </div>
     </div>
@@ -542,6 +557,7 @@ export default {
       formShow: false,
       users: [],
       newUser: { username: '', email: '', password: '', role: 'user' },
+      showAddUser: false,
       editingUser: null,
       userForm: { username: '', email: '', password: '', role: 'user', status: 'active' },
       showMe: false,
@@ -592,6 +608,14 @@ export default {
       return map[this.settings.smtp.vendor] || ''
     }
   },
+  watch: {
+    msg(val) {
+      if (val) this._flash('msg')
+    },
+    error(val) {
+      if (val) this._flash('error')
+    }
+  },
   async mounted() {
     this.loadPublicSettings()
     try {
@@ -607,6 +631,12 @@ export default {
     if (this.token) await this.init()
   },
   methods: {
+    _flash(key) {
+      clearTimeout(this._flashTimer)
+      this._flashTimer = setTimeout(() => {
+        this[key] = ''
+      }, 3000)
+    },
     emptyForm() {
       return { id: 0, title: '', username: '', password: '', url: '', category: '', notes: '' }
     },
@@ -957,6 +987,18 @@ export default {
         this.error = this.$t('msg.titleRequired')
         return
       }
+      if (!this.form.username) {
+        this.error = this.$t('msg.usernameRequired')
+        return
+      }
+      if (!this.form.password) {
+        this.error = this.$t('msg.passwordRequired')
+        return
+      }
+      if (!this.form.url) {
+        this.error = this.$t('msg.urlRequired')
+        return
+      }
       try {
         if (this.form.id) await api.updateEntry(this.form, this.token)
         else await api.createEntry(this.form, this.token)
@@ -1084,10 +1126,16 @@ export default {
       URL.revokeObjectURL(url)
       this.msg = this.$t('msg.saved')
     },
+    openAddUser() {
+      this.userError = ''
+      this.newUser = { username: '', email: '', password: '', role: 'user' }
+      this.showAddUser = true
+    },
     async createUser() {
       this.userError = ''
       try {
         await api.createUser(this.newUser, this.token)
+        this.showAddUser = false
         this.newUser = { username: '', email: '', password: '', role: 'user' }
         this.msg = this.$t('msg.userAdded')
         await this.loadUsers()
@@ -1616,6 +1664,28 @@ export default {
   justify-content: flex-end;
   margin-top: 12px;
 }
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  max-width: calc(100% - 32px);
+}
+.toast-error {
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+}
+.toast-msg {
+  background: #f0fdf4;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+}
 /* Settings Card */
 .settings-card {
   background: #fff;
@@ -1832,6 +1902,9 @@ a.footer-link:hover {
   }
   .form-grid {
     grid-template-columns: 1fr;
+  }
+  .hide-mobile {
+    display: none;
   }
 }
 </style>
