@@ -377,6 +377,9 @@
         </div>
 
         <div class="card-footer">
+          <button class="btn-ghost" @click="exportSettings">{{ $t('settings.exportConfig') }}</button>
+          <button class="btn-ghost" @click="$refs.configInput.click()">{{ $t('settings.importConfig') }}</button>
+          <input ref="configInput" type="file" accept=".json,application/json" style="display:none" @change="importSettingsFile" />
           <button class="btn-primary" @click="saveSettings">{{ $t('modal.save') }}</button>
         </div>
       </div>
@@ -958,6 +961,36 @@ export default {
         await this.loadSettings()
       } catch (e) {
         this.error = String(e.message || e)
+      }
+    },
+    async exportSettings() {
+      try {
+        const r = await api.exportSettings(this.token)
+        const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = this.$t('app.title') + '-config.json'
+        a.click()
+        URL.revokeObjectURL(url)
+        this.msg = this.$t('msg.saved')
+      } catch (e) {
+        this.error = String(e.message || e)
+      }
+    },
+    async importSettingsFile(e) {
+      const file = e.target.files && e.target.files[0]
+      if (!file) return
+      try {
+        const text = await file.text()
+        const data = JSON.parse(text)
+        await api.importSettings(data, this.token)
+        this.msg = this.$t('msg.saved')
+        await this.loadSettings()
+      } catch (err) {
+        this.error = String(err.message || err)
+      } finally {
+        e.target.value = ''
       }
     },
     async sendTestEmail() {

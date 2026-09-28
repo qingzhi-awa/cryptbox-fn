@@ -89,6 +89,8 @@ func (s *Server) register(r *gin.Engine) {
 				admin.GET("/settings", s.handleGetSettings)
 				admin.PUT("/settings", s.handleUpdateSettings)
 				admin.POST("/settings/test-email", s.handleTestEmail)
+				admin.GET("/settings/export", s.handleExportSettings)
+				admin.POST("/settings/import", s.handleImportSettings)
 			}
 		}
 	}
@@ -1352,6 +1354,52 @@ func (s *Server) handleTestEmail(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleExportSettings 导出系统配置（meta 中除 encryption_key 外的所有键值），供备份/迁移。
+func (s *Server) handleExportSettings(c *gin.Context) {
+	rows, err := s.DB.Query(`SELECT key, value FROM meta WHERE key != 'encryption_key' ORDER BY key`)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	meta := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			continue
+		}
+		meta[k] = v
+	}
+	writeJSON(c, http.StatusOK, gin.H{"meta": meta})
+}
+
+// handleImportSettings 导入系统配置（仅写入 meta 键值，忽略 encryption_key 避免覆盖加密密钥）。
+func (s *Server) handleImportSettings(c *gin.Context) {
+	var req struct {
+		Meta map[string]string `json:"meta"`
+	}
+	if err := readJSON(c, &req); err != nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if req.Meta == nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "meta 不能为空"})
+		return
+	}
+	for k, v := range req.Meta {
+		if k == "" || k == "encryption_key" {
+			continue
+		}
+		if err := db.SetMeta(s.DB, k, v); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+	}
+	claims := currentClaims(c)
+	log.LogAction(s.DB, claims.UserID, claims.Username, "import_settings", "导入系统配置", clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
 

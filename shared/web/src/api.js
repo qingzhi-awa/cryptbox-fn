@@ -47,6 +47,8 @@ export default {
   getSettings: (t) => request('GET', '/api/settings', undefined, t),
   updateSettings: (data, t) => request('PUT', '/api/settings', data, t),
   testEmail: (email, t) => request('POST', '/api/settings/test-email', { email }, t),
+  exportSettings: (t) => request('GET', '/api/settings/export', undefined, t),
+  importSettings: (data, t) => request('POST', '/api/settings/import', data, t),
   sendRegisterCode: (email) => request('POST', '/api/register/send-code', { email }),
   sendResetCode: (email) => request('POST', '/api/reset/send-code', { email }),
   resetPassword: (data) => request('POST', '/api/reset', data)
