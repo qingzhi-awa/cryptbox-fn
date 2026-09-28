@@ -18,7 +18,7 @@ if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
         163)     SMTP_HOST="smtp.163.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
         gmail)   SMTP_HOST="smtp.gmail.com";     SMTP_PORT="587"; SMTP_SSL="false" ;;
         outlook) SMTP_HOST="smtp.office365.com"; SMTP_PORT="587"; SMTP_SSL="false" ;;
-        custom)  SMTP_HOST="${wizard_smtp_host:-}"; SMTP_PORT="465"; SMTP_SSL="true" ;;
+        custom)  SMTP_HOST="${wizard_smtp_host:-}"; SMTP_PORT="${wizard_smtp_port:-465}"; SMTP_SSL="${wizard_smtp_ssl:-true}" ;;
         *)       SMTP_HOST="" ;;
     esac
     if [ -n "${SMTP_HOST}" ]; then
