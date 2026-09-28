@@ -255,8 +255,8 @@ func IsInitialized(db *sql.DB) bool {
 }
 
 // SetupAdmin 首次创建超级管理员（passwordHash 为已哈希的密码），返回新用户 ID。
-func SetupAdmin(db *sql.DB, username, passwordHash string) (int64, error) {
-	res, err := db.Exec(`INSERT INTO users (username, password_hash, role, status) VALUES (?, ?, 'superadmin', 'active')`, username, passwordHash)
+func SetupAdmin(db *sql.DB, username, passwordHash, email string) (int64, error) {
+	res, err := db.Exec(`INSERT INTO users (username, password_hash, role, status, email) VALUES (?, ?, 'superadmin', 'active', ?)`, username, passwordHash, email)
 	if err != nil {
 		return 0, err
 	}

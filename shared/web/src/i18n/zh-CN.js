@@ -55,6 +55,7 @@ export default {
     copied: '已复制',
     titleRequired: '标题不能为空',
     usernameRequired: '用户名不能为空',
+    emailRequired: '邮箱不能为空',
     passwordRequired: '密码不能为空',
     urlRequired: '网址不能为空',
     saved: '已保存',

@@ -451,11 +451,11 @@
     <div v-if="showAddUser" class="mask" @click.self="showAddUser = false">
       <div class="modal">
         <h2>{{ $t('users.add') }}</h2>
-        <label>{{ $t('users.username') }}</label>
+        <label>{{ $t('users.username') }} *</label>
         <input v-model="newUser.username" />
-        <label>{{ $t('users.email') }}</label>
+        <label>{{ $t('users.email') }} *</label>
         <input v-model="newUser.email" />
-        <label>{{ $t('users.password') }}</label>
+        <label>{{ $t('users.password') }} *</label>
         <input v-model="newUser.password" type="password" />
         <label>{{ $t('users.role') }}</label>
         <select v-model="newUser.role">
@@ -1133,6 +1133,18 @@ export default {
     },
     async createUser() {
       this.userError = ''
+      if (!this.newUser.username) {
+        this.userError = this.$t('msg.usernameRequired')
+        return
+      }
+      if (!this.newUser.email) {
+        this.userError = this.$t('msg.emailRequired')
+        return
+      }
+      if (!this.newUser.password || this.newUser.password.length < 6) {
+        this.userError = this.$t('msg.passwordRequired')
+        return
+      }
       try {
         await api.createUser(this.newUser, this.token)
         this.showAddUser = false

@@ -200,7 +200,7 @@ func (s *Server) handleSetup(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	id, err := db.SetupAdmin(s.DB, req.Username, hash)
+	id, err := db.SetupAdmin(s.DB, req.Username, hash, "")
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -646,8 +646,13 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
 	if req.Username == "" || len(req.Password) < 6 {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空，密码至少 6 位"})
+		return
+	}
+	if req.Email == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
 	}
 	if req.Role != "admin" && req.Role != "user" {

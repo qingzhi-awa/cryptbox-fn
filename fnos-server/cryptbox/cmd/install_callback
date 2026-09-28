@@ -11,25 +11,39 @@ chmod +x "${TRIM_APPDEST}/reset-password.sh" 2>/dev/null
 # 管理员账号
 USERNAME="${wizard_admin_username:-}"
 PASSWORD="${wizard_admin_password:-}"
+EMAIL="${wizard_admin_email:-}"
 if [ -n "${USERNAME}" ] && [ -n "${PASSWORD}" ]; then
     SETUP_FILE="${TRIM_PKGVAR}/setup.conf"
-    # 首行用户名、次行密码；密码保留原样（不转义、不去空格）
-    printf '%s\n%s\n' "${USERNAME}" "${PASSWORD}" > "${SETUP_FILE}"
+    # 首行用户名、次行密码、第三行邮箱；密码保留原样（不转义、不去空格）
+    printf '%s\n%s\n%s\n' "${USERNAME}" "${PASSWORD}" "${EMAIL}" > "${SETUP_FILE}"
     chmod 600 "${SETUP_FILE}" 2>/dev/null
 fi
 
-# SMTP 配置（可选，host 为空则跳过）
-SMTP_HOST="${wizard_smtp_host:-}"
-if [ -n "${SMTP_HOST}" ]; then
-    SMTP_FILE="${TRIM_PKGVAR}/smtp.conf"
-    # 5 行：host / port / username / password / ssl
-    printf '%s\n%s\n%s\n%s\n%s\n' \
-        "${SMTP_HOST}" \
-        "${wizard_smtp_port:-465}" \
-        "${wizard_smtp_username:-}" \
-        "${wizard_smtp_password:-}" \
-        "${wizard_smtp_ssl:-true}" > "${SMTP_FILE}"
-    chmod 600 "${SMTP_FILE}" 2>/dev/null
+# SMTP 配置（可选，vendor 为空则跳过）
+SMTP_VENDOR="${wizard_smtp_vendor:-}"
+SMTP_USERNAME="${wizard_smtp_username:-}"
+if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
+    # 根据服务商预设 host/port/ssl
+    case "${SMTP_VENDOR}" in
+        qq)      SMTP_HOST="smtp.qq.com";        SMTP_PORT="465"; SMTP_SSL="true" ;;
+        126)     SMTP_HOST="smtp.126.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        163)     SMTP_HOST="smtp.163.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        gmail)   SMTP_HOST="smtp.gmail.com";     SMTP_PORT="587"; SMTP_SSL="false" ;;
+        outlook) SMTP_HOST="smtp.office365.com"; SMTP_PORT="587"; SMTP_SSL="false" ;;
+        custom)  SMTP_HOST="${wizard_smtp_host:-}"; SMTP_PORT="465"; SMTP_SSL="true" ;;
+        *)       SMTP_HOST="" ;;
+    esac
+    if [ -n "${SMTP_HOST}" ]; then
+        SMTP_FILE="${TRIM_PKGVAR}/smtp.conf"
+        # 5 行：host / port / username / password / ssl
+        printf '%s\n%s\n%s\n%s\n%s\n' \
+            "${SMTP_HOST}" \
+            "${SMTP_PORT}" \
+            "${SMTP_USERNAME}" \
+            "${wizard_smtp_password:-}" \
+            "${SMTP_SSL}" > "${SMTP_FILE}"
+        chmod 600 "${SMTP_FILE}" 2>/dev/null
+    fi
 fi
 
 exit 0

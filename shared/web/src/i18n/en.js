@@ -55,6 +55,7 @@ export default {
     copied: 'Copied',
     titleRequired: 'Title is required',
     usernameRequired: 'Username is required',
+    emailRequired: 'Email is required',
     passwordRequired: 'Password is required',
     urlRequired: 'URL is required',
     saved: 'Saved',

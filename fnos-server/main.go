@@ -181,6 +181,10 @@ func setupAdminFromInstall(database *sql.DB, cfg config.Config) error {
 	}
 	username := strings.TrimSpace(lines[0])
 	password := lines[1] // 密码保留原样，不去空格
+	email := ""
+	if len(lines) >= 3 {
+		email = strings.TrimSpace(lines[2])
+	}
 	if username == "" || password == "" {
 		return nil
 	}
@@ -188,7 +192,7 @@ func setupAdminFromInstall(database *sql.DB, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.SetupAdmin(database, username, hash)
+	_, err = db.SetupAdmin(database, username, hash, email)
 	return err
 }
 
