@@ -136,27 +136,9 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 					role = "admin"
 				}
 				claims := &auth.Claims{UserID: id, Username: gwUser, Role: role}
-				// 下发 HttpOnly Cookie：网关刷新时 X-Trim 可能缺失，靠 Cookie 维持登录态。
-				if token, err := auth.GenerateToken(s.Cfg.JWTSecret, id, gwUser, role); err == nil {
-					c.SetCookie("cryptbox_token", token, 7*24*3600, "/", "", false, true)
-				}
 				c.Set("claims", claims)
 				c.Next()
 				return
-			}
-		}
-
-		// 3. Cookie 回退：网关刷新后 X-Trim 未转发时，用登录时下发的 Cookie。
-		// 注意：保留 Cookie 中的角色（含网关鉴权时 X-Trim-Isadmin 的管理员提升），
-		// 仅重新校验账号仍为 active，否则刷新后管理员权限会丢失。
-		if cookieToken, err := c.Cookie("cryptbox_token"); err == nil && cookieToken != "" {
-			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, cookieToken); err == nil {
-				var status string
-				if err := s.DB.QueryRow(`SELECT status FROM users WHERE id = ?`, claims.UserID).Scan(&status); err == nil && status == "active" {
-					c.Set("claims", claims)
-					c.Next()
-					return
-				}
 			}
 		}
 
