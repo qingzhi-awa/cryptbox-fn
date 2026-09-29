@@ -3,11 +3,13 @@
         "cryptbox.Application": {
             "title": "密匣",
             "icon": "images/icon_{0}.png",
-            "type": "url",
+            "type": "iframe",
             "protocol": "http",
             "port": "5201",
-            "url": "/",
-            "allUsers": true
+            "url": "/app/cryptbox/",
+            "allUsers": true,
+            "gatewaySocket": "app.sock",
+            "gatewayPrefix": "/app/cryptbox"
         }
     }
 }
