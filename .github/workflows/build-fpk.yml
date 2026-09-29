@@ -1,0 +1,104 @@
+name: Build fnOS fpk
+
+# 在 Linux runner 上构建飞牛端 fpk 安装包：
+# 中文版 fnos-cryptbox-{x86,arm}-<version>.fpk
+# 英文版 fygo-cryptbox-{x86,arm}-<version>.fpk
+# 触发：push main / 打 tag v* / 手动；打 tag v* 时自动发布 Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build-fpk:
+    name: Build fpk (cn/en, x86/arm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fnpack
+        run: |
+          curl -fsSL -o fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
+          chmod +x fnpack
+          sudo mv fnpack /usr/local/bin/fnpack
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fnos-server/go.mod
+          cache: true
+          cache-dependency-path: |
+            fnos-server/go.sum
+            shared/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: shared/web/package-lock.json
+
+      - name: Build web frontend
+        working-directory: shared/web
+        run: |
+          npm install
+          npm run build
+
+      - name: Cross-compile Linux binaries
+        working-directory: fnos-server
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cryptbox/app/cryptbox-server .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cryptbox/app/cryptbox-server-arm64 .
+          cp cryptbox/app/cryptbox-server cryptbox-en/app/cryptbox-server
+          cp cryptbox/app/cryptbox-server-arm64 cryptbox-en/app/cryptbox-server-arm64
+
+      - name: Pack fpk (cn x86/arm + en x86/arm)
+        working-directory: fnos-server
+        run: |
+          VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' cryptbox/manifest | tr -d '[:space:]')
+          echo "version=$VERSION"
+
+          # 中文版 x86 / arm
+          sed -i -E 's/^(platform[[:space:]]*=[[:space:]]*).*/\1x86/' cryptbox/manifest
+          fnpack build --directory cryptbox
+          mv cryptbox.fpk "fnos-cryptbox-x86-$VERSION.fpk"
+
+          sed -i -E 's/^(platform[[:space:]]*=[[:space:]]*).*/\1arm/' cryptbox/manifest
+          fnpack build --directory cryptbox
+          mv cryptbox.fpk "fnos-cryptbox-arm-$VERSION.fpk"
+
+          # 英文版 x86 / arm
+          sed -i -E 's/^(platform[[:space:]]*=[[:space:]]*).*/\1x86/' cryptbox-en/manifest
+          fnpack build --directory cryptbox-en
+          mv cryptbox.fpk "fygo-cryptbox-x86-$VERSION.fpk"
+
+          sed -i -E 's/^(platform[[:space:]]*=[[:space:]]*).*/\1arm/' cryptbox-en/manifest
+          fnpack build --directory cryptbox-en
+          mv cryptbox.fpk "fygo-cryptbox-arm-$VERSION.fpk"
+
+          ls -la *.fpk
+
+      - name: Upload fpk artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-packages
+          path: fnos-server/*.fpk
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-fpk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fpk-packages
+          path: dist
+
+      - name: Attach fpk to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.fpk
+          generate_release_notes: true

@@ -1,0 +1,15 @@
+#!/bin/bash
+
+### This script is called after the user uninstalls the application.
+### Clear user data when wizard_delete_data=true in wizard/uninstall.
+
+DATA="${wizard_delete_data:-false}"
+
+if [ "$DATA" = "true" ]; then
+    # Delete the main data directory (database, logs, etc.)
+    if [ -n "${TRIM_PKGVAR}" ] && [ -d "${TRIM_PKGVAR}" ]; then
+        rm -rf "${TRIM_PKGVAR}"/* 2>/dev/null
+    fi
+fi
+
+exit 0

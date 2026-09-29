@@ -1,0 +1,38 @@
+#!/bin/bash
+
+### This script is called before the user upgrades the application.
+### Back up user data before upgrade (the var directory is preserved by the system during upgrade; an extra snapshot is made here just in case).
+
+DB_FILE="${TRIM_PKGVAR}/app.db"
+
+# No backup needed when there is no data directory or database file
+if [ -z "${TRIM_PKGVAR}" ] || [ ! -f "${DB_FILE}" ]; then
+    exit 0
+fi
+
+BACKUP_DIR="${TRIM_PKGVAR}/backups"
+mkdir -p "${BACKUP_DIR}" 2>/dev/null
+if [ ! -d "${BACKUP_DIR}" ]; then
+    echo "Failed to create backup directory" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+fi
+
+STAMP=$(date +%Y%m%d%H%M%S)
+BAK_FILE="${BACKUP_DIR}/app.db.${TRIM_OLD_APPVER:-pre}.${STAMP}.bak"
+
+# Prefer sqlite3 online safe backup (consistent snapshot even when the app is running); fall back to cp if it fails or sqlite3 is unavailable.
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "${DB_FILE}" ".backup ${BAK_FILE}" 2>/dev/null
+fi
+if [ ! -f "${BAK_FILE}" ]; then
+    cp -f "${DB_FILE}" "${BAK_FILE}" 2>/dev/null
+fi
+if [ ! -f "${BAK_FILE}" ]; then
+    echo "Data backup before upgrade failed" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+fi
+
+# Keep only the most recent 3 backups
+ls -1t "${BACKUP_DIR}"/app.db.*.bak 2>/dev/null | tail -n +4 | xargs -r rm -f 2>/dev/null
+
+exit 0

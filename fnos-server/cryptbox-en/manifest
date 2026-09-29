@@ -1,0 +1,15 @@
+appname               = cryptbox
+version               = 0.2.3
+display_name          = CryPtBox
+desc                  = CryPtBox is a local-first, cross-platform password manager with optional cloud sync. The client and server are both open source.
+platform              = x86
+source                = thirdparty
+maintainer            = CryPtBox
+maintainer_url        = https://cryptbox.fnosp.com
+distributor           = Qingzhi
+distributor_url       = https://07qingzhi.cn
+service_port          = 5201
+checkport             = true
+desktop_uidir         = ui
+desktop_applaunchname = cryptbox.Application
+changelog             = ✅ 1. Fix login issues\n[Login] Fix incorrect password error message\n[Login] Fix bug where user info and sync buttons fail to load after login\n✅ 2. Improve delete operation\nReplace native dialogs with built-in custom confirmation dialogs for safer, unified operations\n✅ 3. New Recycle Bin feature\n[Recycle Bin] Soft-delete data, keep complete data, support recovery\n[Recycle Bin] Support list view, restore, permanent delete, empty all\n[Recycle Bin] Built-in auto-cleanup of expired items\n[Recycle Bin] Support toggling recycle bin and custom retention days (default 30 days)\n[Recycle Bin] Support per-user settings and server-side global configuration\n✅ 4. Improve multi-language support\n[Language] Fix incomplete translations in client and server

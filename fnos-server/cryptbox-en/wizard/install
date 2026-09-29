@@ -1,0 +1,115 @@
+[
+    {
+        "stepTitle": "Language / 语言",
+        "items": [
+            {
+                "type": "radio",
+                "field": "wizard_language",
+                "label": "Select the default language for the software / 选择软件默认语言",
+                "initValue": "en",
+                "options": [
+                    { "label": "English", "value": "en" },
+                    { "label": "简体中文", "value": "zh-CN" }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "Terms of Use",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "CryPtBox is open-source software. Both the client and server source code can be publicly audited. The server runs entirely on your local fnOS device, and all data (including the password vault) is encrypted and stored in the local database. Nothing is uploaded to any server, and the developer cannot access your device or data."
+            },
+            {
+                "type": "checkbox",
+                "field": "wizard_agree",
+                "label": "Terms of Use",
+                "options": [
+                    { "label": "I have read and agree to the Terms of Use & Privacy Statement", "value": "agree" }
+                ],
+                "rules": [
+                    { "required": true, "message": "Please agree to the terms first" }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "Instructions",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "Welcome to CryPtBox. Please read the instructions carefully before use.<br>1. The default port is 5201.<br>2. Set your username and password in the next step.<br>3. If you forget the password, run<br>&nbsp;&nbsp;&nbsp;&nbsp;bash /var/apps/cryptbox/target/reset-password.sh"
+            }
+        ]
+    },
+    {
+        "stepTitle": "Admin Account",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "Set up the CryPtBox admin account. You will use it to log in after installation."
+            },
+            {
+                "type": "text",
+                "field": "wizard_admin_username",
+                "label": "Admin Username",
+                "rules": [
+                    { "required": true, "message": "Please enter a username" },
+                    { "min": 3, "max": 20, "message": "Username must be 3-20 characters" },
+                    { "pattern": "^[a-zA-Z0-9_]+$", "message": "Only letters, numbers and underscores are allowed" }
+                ]
+            },
+            {
+                "type": "password",
+                "field": "wizard_admin_password",
+                "label": "Admin Password",
+                "rules": [
+                    { "required": true, "message": "Please enter a password" },
+                    { "min": 6, "message": "Password must be at least 6 characters" }
+                ]
+            },
+            {
+                "type": "text",
+                "field": "wizard_admin_email",
+                "label": "Admin Email",
+                "rules": [
+                    { "required": true, "message": "Please enter an email" },
+                    { "pattern": "^[^@]+@[^@]+\\.[^@]+$", "message": "Invalid email format" }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "Email Service (Optional)",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "The email service is used for registration verification codes and password recovery. It can be skipped. If skipped, related features will be unavailable, and you can configure it later in System Settings."
+            },
+            {
+                "type": "select",
+                "field": "wizard_smtp_vendor",
+                "label": "Provider",
+                "initValue": "qq",
+                "options": [
+                    { "label": "QQ Mail", "value": "qq" },
+                    { "label": "126 Mail", "value": "126" },
+                    { "label": "163 Mail", "value": "163" },
+                    { "label": "Gmail", "value": "gmail" },
+                    { "label": "Outlook", "value": "outlook" }
+                ]
+            },
+            {
+                "type": "text",
+                "field": "wizard_smtp_username",
+                "label": "Email Account"
+            },
+            {
+                "type": "password",
+                "field": "wizard_smtp_password",
+                "label": "Email Password / Auth Code"
+            }
+        ]
+    }
+]

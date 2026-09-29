@@ -1,0 +1,53 @@
+#!/bin/bash
+
+### This script is called after the user installs the application.
+### Write the admin account and SMTP config from the install wizard to init files for server startup.
+
+mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+# Default language (selected in the install wizard)
+LANGUAGE="${wizard_language:-en}"
+printf '%s\n' "${LANGUAGE}" > "${TRIM_PKGVAR}/language.conf"
+
+# Make the reset-password script executable (under target dir, run directly after SSH login)
+chmod +x "${TRIM_APPDEST}/reset-password.sh" 2>/dev/null
+
+# Admin account
+USERNAME="${wizard_admin_username:-}"
+PASSWORD="${wizard_admin_password:-}"
+EMAIL="${wizard_admin_email:-}"
+if [ -n "${USERNAME}" ] && [ -n "${PASSWORD}" ]; then
+    SETUP_FILE="${TRIM_PKGVAR}/setup.conf"
+    # First line username, second line password, third line email; keep password as-is
+    printf '%s\n%s\n%s\n' "${USERNAME}" "${PASSWORD}" "${EMAIL}" > "${SETUP_FILE}"
+    chmod 600 "${SETUP_FILE}" 2>/dev/null
+fi
+
+# SMTP config (optional, skip if vendor is empty)
+SMTP_VENDOR="${wizard_smtp_vendor:-}"
+SMTP_USERNAME="${wizard_smtp_username:-}"
+if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
+    # Map vendor to host/port/ssl presets
+    case "${SMTP_VENDOR}" in
+        qq)      SMTP_HOST="smtp.qq.com";        SMTP_PORT="465"; SMTP_SSL="true" ;;
+        126)     SMTP_HOST="smtp.126.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        163)     SMTP_HOST="smtp.163.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        gmail)   SMTP_HOST="smtp.gmail.com";     SMTP_PORT="587"; SMTP_SSL="false" ;;
+        outlook) SMTP_HOST="smtp.office365.com"; SMTP_PORT="587"; SMTP_SSL="false" ;;
+        *)       SMTP_HOST="" ;;
+    esac
+    if [ -n "${SMTP_HOST}" ]; then
+        SMTP_FILE="${TRIM_PKGVAR}/smtp.conf"
+        # 6 lines: host / port / username / password / ssl / vendor
+        printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+            "${SMTP_HOST}" \
+            "${SMTP_PORT}" \
+            "${SMTP_USERNAME}" \
+            "${wizard_smtp_password:-}" \
+            "${SMTP_SSL}" \
+            "${SMTP_VENDOR}" > "${SMTP_FILE}"
+        chmod 600 "${SMTP_FILE}" 2>/dev/null
+    fi
+fi
+
+exit 0

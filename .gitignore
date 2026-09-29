@@ -1,14 +1,13 @@
-# 飞牛应用打包目录（英文版，暂不同步）
-fnos-server/cryptbox-en/
-
 # 编译与打包产物
 fnos-server/fnos-server.exe
 fnos-server/*.fpk
 fnos-server/web/
 
-# cryptbox 目录中的编译产物（Linux 二进制）
+# 打包目录中的编译产物（Linux 二进制）
 fnos-server/cryptbox/app/cryptbox-server
 fnos-server/cryptbox/app/cryptbox-server-arm64
+fnos-server/cryptbox-en/app/cryptbox-server
+fnos-server/cryptbox-en/app/cryptbox-server-arm64
 
 # 前端依赖
 shared/web/node_modules/

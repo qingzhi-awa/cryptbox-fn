@@ -1,0 +1,35 @@
+#!/bin/bash
+
+### This script is called before the user installs the application.
+
+# Must agree to the terms of use
+if [ "${wizard_agree:-}" != "agree" ]; then
+    echo "Please agree to the terms of use first" >&2
+    exit 1
+fi
+
+# If SMTP is configured, send a test email to verify the config; abort install on failure
+SMTP_VENDOR="${wizard_smtp_vendor:-}"
+SMTP_USERNAME="${wizard_smtp_username:-}"
+if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
+    case "${SMTP_VENDOR}" in
+        qq)      SMTP_HOST="smtp.qq.com";        SMTP_PORT="465"; SMTP_SSL="true" ;;
+        126)     SMTP_HOST="smtp.126.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        163)     SMTP_HOST="smtp.163.com";       SMTP_PORT="465"; SMTP_SSL="true" ;;
+        gmail)   SMTP_HOST="smtp.gmail.com";     SMTP_PORT="587"; SMTP_SSL="false" ;;
+        outlook) SMTP_HOST="smtp.office365.com"; SMTP_PORT="587"; SMTP_SSL="false" ;;
+        *)       SMTP_HOST="" ;;
+    esac
+    if [ -n "${SMTP_HOST}" ]; then
+        BIN="${TRIM_APPDEST}/cryptbox-server"
+        [ -x "${BIN}" ] || BIN="${TRIM_APPDEST}/cryptbox-server-arm64"
+        if [ -x "${BIN}" ]; then
+            if ! "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${wizard_smtp_password:-}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
+                echo "Failed to send test email. Please go back and check the SMTP settings." >&2
+                exit 1
+            fi
+        fi
+    fi
+fi
+
+exit 0

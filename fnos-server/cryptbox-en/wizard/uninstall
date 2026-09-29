@@ -1,0 +1,25 @@
+[{
+  "stepTitle": "Uninstall",
+  "items": [
+    {
+    "type": "tips",
+    "helpText": "Keep or delete application settings."
+	},
+    {
+	  "type":"radio",
+      "field": "wizard_delete_data",
+      "label": "Uninstall only, keep existing files for future reinstallation.",
+      "initValue": "false",
+	  "options":[
+	    {
+                 "label": "Keep existing files",
+                    "value": "false"
+                },
+                {
+                    "label": "Delete all package data files (irreversible)!!!",
+                    "value": "true"
+                }
+	  ]
+    }
+	]
+}]

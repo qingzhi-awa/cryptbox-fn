@@ -1,0 +1,15 @@
+{
+    ".url": {
+        "cryptbox.Application": {
+            "title": "CryPtBox",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "5201",
+            "url": "/app/cryptbox/",
+            "allUsers": true,
+            "gatewaySocket": "app.sock",
+            "gatewayPrefix": "/app/cryptbox"
+        }
+    }
+}
