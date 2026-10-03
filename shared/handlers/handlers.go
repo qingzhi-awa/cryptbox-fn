@@ -286,6 +286,20 @@ func authTokenFromRequest(c *gin.Context) string {
 	return ""
 }
 
+// gatewayIdentity 返回飞牛统一网关标识的当前访问者身份，用于把密匣会话与飞牛账号绑定。
+// 网关在转发前完成登录态校验，并注入 X-Trim-Userid（UID）与 X-Trim-Username；
+// 这里以 UID 优先、用户名兜底，并加前缀避免二者取值恰好相同时产生歧义。
+// 直连端口等非网关场景不带这些头，返回空串表示「不参与账号隔离校验」。
+func gatewayIdentity(c *gin.Context) string {
+	if uid := strings.TrimSpace(c.GetHeader("X-Trim-Userid")); uid != "" {
+		return "uid:" + uid
+	}
+	if name := strings.TrimSpace(c.GetHeader("X-Trim-Username")); name != "" {
+		return "name:" + name
+	}
+	return ""
+}
+
 // sessionCookiePath 依据请求路径推导 Cookie 作用域：
 // 经网关访问时原始路径形如 /app/cryptbox/api/login → Path=/app/cryptbox
 // （令牌不外泄给同一主机上的其他服务）；直连端口时为 /api/login → Path=/。
@@ -327,7 +341,7 @@ func clearSessionCookie(c *gin.Context) {
 
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 仅认自定义账号密码签发的 JWT（不使用飞牛网关 X-Trim 头做强制验证），
+		// 仅认自定义账号密码签发的 JWT（不使用飞牛网关 X-Trim 头做身份认证），
 		// 凭据可来自 Authorization 头、X-Auth-Token 头或会话 Cookie。
 		if tok := authTokenFromRequest(c); tok != "" {
 			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, tok); err == nil {
@@ -338,6 +352,16 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 				var tokenVer int64
 				if err := s.DB.QueryRow(`SELECT role, status, COALESCE(token_version, 0) FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status, &tokenVer); err == nil &&
 					status == "active" && tokenVer == claims.TokenVer {
+					// 飞牛账号隔离：经统一网关访问时，会话必须与签发它的飞牛账号一致。
+					// 切换飞牛账号后，浏览器里残留的 Cookie/sessionStorage 仍带着上一个
+					// 飞牛账号签发的令牌，此处按 FnUID 不一致直接拒绝并清除 Cookie，
+					// 使各飞牛账号之间互不沿用登录态（直连端口场景无该头，不参与校验）。
+					if g := gatewayIdentity(c); g != "" && claims.FnUID != g {
+						clearSessionCookie(c)
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "reason": "fnos_account_changed"})
+						c.Abort()
+						return
+					}
 					claims.Role = role
 					c.Set("claims", claims)
 					c.Next()
@@ -495,7 +519,7 @@ func (s *Server) handleSetup(c *gin.Context) {
 			return
 		}
 	}
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "superadmin", db.TokenVersion(s.DB, id))
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "superadmin", db.TokenVersion(s.DB, id), gatewayIdentity(c))
 	setSessionCookie(c, token)
 	log.LogAction(s.DB, id, req.Username, "setup", "初始化超级管理员", clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": req.Username, "role": "superadmin", "avatar": avatarName(id)})
@@ -564,7 +588,7 @@ func (s *Server) handleRegister(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "user", db.TokenVersion(s.DB, id))
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "user", db.TokenVersion(s.DB, id), gatewayIdentity(c))
 	setSessionCookie(c, token)
 	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": req.Username, "role": "user", "avatar": avatarName(id)})
 }
@@ -611,7 +635,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	}
 	s.loginLock.Reset(lockKey)
 	log.LogAction(s.DB, id, uname, "login", "用户登录", clientIP(c))
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, uname, role, db.TokenVersion(s.DB, id))
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, uname, role, db.TokenVersion(s.DB, id), gatewayIdentity(c))
 	setSessionCookie(c, token)
 	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": uname, "role": role, "avatar": avatarName(id), "vault_key_enc": vaultKeyEnc, "kdf_salt": kdfSalt})
 }
@@ -1271,7 +1295,7 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 	// 改密后令牌版本已 +1，旧令牌即刻失效；这里为**当前会话**重新签发一个，
 	// 并把新令牌回给前端（同时刷新 Cookie），避免用户被自己登出。
 	if req.NewPassword != "" {
-		if tok, err := auth.GenerateToken(s.Cfg.JWTSecret, claims.UserID, username, claims.Role, db.TokenVersion(s.DB, claims.UserID)); err == nil {
+		if tok, err := auth.GenerateToken(s.Cfg.JWTSecret, claims.UserID, username, claims.Role, db.TokenVersion(s.DB, claims.UserID), gatewayIdentity(c)); err == nil {
 			setSessionCookie(c, tok)
 			resp["token"] = tok
 		}

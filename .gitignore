@@ -1,17 +1,49 @@
-# 编译与打包产物
+# ========================================================
+# cryptbox-fn 仓库仅纳入 fnos-server/ 与 shared/
+# （客户端见 qingzhi-awa/cryptbox，server/、website/ 不纳入版本库）
+# ========================================================
+
+# 非本仓库范围的本地目录
+/client/
+/server/
+/website/
+/.workbuddy/
+/.backup-db/
+
+# 本地资料文档与压缩包（内部报告，不入库）
+/*.md
+!/README.md
+/Fileport.zip
+
+# 依赖与构建产物
+node_modules/
+*.exe
+*.fpk
+*.o
+*.a
+
+# fnOS 打包产物与内嵌前端（由打包脚本/CI 生成）
 fnos-server/fnos-server.exe
 fnos-server/*.fpk
 fnos-server/web/
-
-# 打包目录中的编译产物（Linux 二进制）
+fnos-server/package-lock.json
 fnos-server/cryptbox/app/cryptbox-server
 fnos-server/cryptbox/app/cryptbox-server-arm64
 fnos-server/cryptbox-en/app/cryptbox-server
 fnos-server/cryptbox-en/app/cryptbox-server-arm64
 
-# 前端依赖
-shared/web/node_modules/
+# 说明：以下目录是 go:embed 的构建输入，必须保留在版本库中，请勿忽略：
+#   shared/web/dist
 
-# macOS 垃圾文件
+# 数据库与本地数据：含口令哈希、密码库密文与上传文件，绝不入库
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 系统垃圾文件
 .DS_Store
+Thumbs.db
 
+# 本地测试残留
+.tmp-*

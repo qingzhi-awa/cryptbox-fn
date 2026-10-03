@@ -1,5 +1,5 @@
 appname               = cryptbox
-version               = 0.2.34
+version               = 0.2.3
 display_name          = CryPtBox
 desc                  = CryPtBox is a local-first, cross-platform password manager with optional cloud sync. The client and server are both open source.
 platform              = arm
@@ -12,4 +12,4 @@ service_port          = 5201
 checkport             = true
 desktop_uidir         = ui
 desktop_applaunchname = cryptbox.Application
-changelog             = ✅ 1. Pin sync (account-level setting)\n[New] Choose whether pinned entries sync across devices: when enabled, pin changes on any device or the web UI propagate everywhere\n[Note] When disabled, desktop pins stay per device and web pins stay per account (previous behavior)\n✅ 2. Server\n[New] entries.pinned column kept in vault sync; new /api/vault/pin-sync endpoint
+changelog             = ✅ 1. User login\n[Login] Improved login experience\n[Password] Fixed inaccurate wrong-password prompts\n[User] Fixed failure to load user info after login\n✅ 2. Sync\n[Sync] Fixed sync button not working in some cases\n[Sync] Improved sync logic\n✅ 3. Security\n[Security] Added multiple security mechanisms\n[Security] Tightened file permissions and enhanced masking of sensitive fields\n[Gateway] Embedded entry now works through the unified gateway for better stability\n[Logs] Added API access logs for easier troubleshooting\n✅ 4. UI & features\n[Display] Fixed page issues in some scenarios\n[Template] Improved import template content and naming\n[Language] Fixed language display issues in some cases\n[Recycle bin] Deletion now uses soft delete, with recovery for accidental deletes\n[Recycle bin] Improved user preference settings

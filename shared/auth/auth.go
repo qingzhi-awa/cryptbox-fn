@@ -38,6 +38,10 @@ type Claims struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`
 	TokenVer int64  `json:"ver"`
+	// FnUID 是签发该令牌时飞牛统一网关标识的访问者身份（X-Trim-Userid，缺失时回退用户名）。
+	// 为空表示非网关场景（如直连端口），此时不参与校验。会话据此与飞牛账号绑定：
+	// 切换飞牛账号后，旧令牌携带的 FnUID 与新账号不一致，服务端立即拒绝并要求重新登录。
+	FnUID string `json:"fnu,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -59,12 +63,14 @@ var TokenTTL = func() time.Duration {
 }()
 
 // GenerateToken 签发有效期为 TokenTTL 的 JWT。tokenVer 与用户当前的令牌版本一致。
-func GenerateToken(secret string, userID int64, username, role string, tokenVer int64) (string, error) {
+// fnUID 标识签发时的飞牛网关用户身份（非网关场景传空串），用于会话与飞牛账号绑定。
+func GenerateToken(secret string, userID int64, username, role string, tokenVer int64, fnUID string) (string, error) {
 	claims := Claims{
 		UserID:   userID,
 		Username: username,
 		Role:     role,
 		TokenVer: tokenVer,
+		FnUID:    fnUID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(TokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

@@ -876,7 +876,11 @@ export default {
       }
       if (!me) {
         this.clearAuth()
-        this.error = lastErr ? String(lastErr.message || lastErr) : ''
+        // 401 表示会话已失效（含飞牛账号切换导致旧会话被拒），静默回到登录页；
+        // 其余异常（网络/服务端错误）才提示，避免误报。
+        if (!(lastErr && lastErr.status === 401)) {
+          this.error = lastErr ? String(lastErr.message || lastErr) : ''
+        }
         return
       }
       // 无本地 token 而能取到用户信息，说明身份来自会话 Cookie（网关直通场景）。
@@ -913,7 +917,9 @@ export default {
         if (this.vaultUnlocked) await this.loadVault()
         if (this.isAdmin) await this.loadUsers()
       } catch (e) {
-        /* 未登录：保持登录页 */
+        // 未登录/会话失效：保持登录页。401 时顺带清掉本地残留凭据
+        // （飞牛账号切换后旧令牌被服务端拒绝，避免界面沿用上一个账号的状态）。
+        if (e && e.status === 401) this.clearAuth()
       }
     },
     async loadPublicSettings() {
