@@ -111,3 +111,27 @@ select:focus {
     padding: 8px 12px;
   }
 }
+
+/* ===== 深色主题（data-theme="dark"，由主题切换按钮控制） ===== */
+html[data-theme='dark'] body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+html[data-theme='dark'] input,
+html[data-theme='dark'] textarea,
+html[data-theme='dark'] select {
+  background: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+html[data-theme='dark'] .btn-ghost,
+html[data-theme='dark'] .mini {
+  background: #334155;
+  color: #e2e8f0;
+}
+html[data-theme='dark'] .error {
+  color: #f87171;
+}
+html[data-theme='dark'] .msg {
+  color: #4ade80;
+}

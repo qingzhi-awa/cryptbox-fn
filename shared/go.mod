@@ -2,6 +2,8 @@ module github.com/qingzhi-awa/cryptbox/shared
 
 go 1.26
 
+toolchain go1.26.6
+
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.2.2

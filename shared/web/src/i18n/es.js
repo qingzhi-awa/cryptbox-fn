@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: 'Plantilla de importación' },
-  login: { username: 'Usuario', usernameOrEmail: 'Usuario / Correo', password: 'Contraseña', submit: 'Iniciar sesión', adminTitle: 'Inicio de sesión de administrador', adminOnly: 'Esta cuenta no tiene permisos de administrador', setupTitle: 'Configurar cuenta de administrador', setupHint: 'Primer uso, configura la cuenta y contraseña de administrador', setupSubmit: 'Crear administrador y entrar', register: 'Registrarse', toRegister: 'Registrarse', forgot: '¿Olvidó su contraseña?', back: 'Volver al inicio de sesión', code: 'Código de verificación', sendCode: 'Enviar código', newPassword: 'Nueva contraseña', resetSubmit: 'Restablecer contraseña', registerClosed: 'El registro está cerrado, contacte al administrador' },
+  login: { username: 'Usuario', usernameOrEmail: 'Usuario / Correo', password: 'Contraseña', submit: 'Iniciar sesión', adminTitle: 'Inicio de sesión de administrador', adminOnly: 'Esta cuenta no tiene permisos de administrador', setupTitle: 'Configurar cuenta de administrador', setupHint: 'Primer uso, configura la cuenta y contraseña de administrador', setupSubmit: 'Crear administrador y entrar', register: 'Registrarse', toRegister: 'Registrarse', forgot: '¿Olvidó su contraseña?', back: 'Volver al inicio de sesión', code: 'Código de verificación', sendCode: 'Enviar código', newPassword: 'Nueva contraseña', resetSubmit: 'Restablecer contraseña', registerClosed: 'El registro está cerrado, contacte al administrador', unlockTitle: 'Desbloquear la caja fuerte', unlockHint: 'Introduce la contraseña de la cuenta para desbloquear la caja fuerte', unlockSubmit: 'Desbloquear', unlockFailed: 'Error al desbloquear, comprueba la contraseña' },
   role: { admin: 'Administrador', user: 'Usuario', superadmin: 'Superadministrador' },
   header: { logout: 'Cerrar sesión', lock: 'Bloquear' },
   tabs: { passwords: 'Mis contraseñas', trash: 'Papelera', users: 'Gestión de usuarios', logs: 'Registro de operaciones', settings: 'Ajustes del sistema' },
@@ -67,7 +67,10 @@ export default {
     enabled: 'Habilitado',
     disabled: 'Deshabilitado',
     codeSent: 'Código de verificación enviado',
-    resetDone: 'Contraseña restablecida, inicie sesión'
+    resetDone: 'Contraseña restablecida, inicie sesión',
+    cryptoUnavailable: 'El cifrado no está disponible (se requiere HTTPS o localhost)',
+    decryptFailed: 'Algunas entradas no se pudieron descifrar, comprueba la contraseña maestra',
+    migrated: 'Se migraron {n} entradas antiguas'
   },
   trash: {
     empty: 'La papelera está vacía',

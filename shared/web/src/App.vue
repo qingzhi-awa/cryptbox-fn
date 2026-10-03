@@ -11,7 +11,7 @@
     <option value="ru">Русский</option>
     <option value="pt">Português</option>
   </select>
-  <!-- 登录 / 注册 / 找回密码 -->
+  <!-- 登录 / 注册 / 找回密码（非加密环境下自动使用纯 JS 降级加密，不再阻断） -->
   <div v-if="!token && !sessionAuth" class="gate">
     <div class="gate-card">
       <h1>{{ gateTitle }}</h1>
@@ -68,6 +68,28 @@
     </div>
   </div>
 
+  <!-- 解锁密码库（端到端加密：需在本地用账号密码派生密钥，服务端不参与） -->
+  <div v-else-if="!vaultUnlocked" class="gate">
+    <div class="gate-card">
+      <h1>{{ $t('login.unlockTitle') }}</h1>
+      <p class="sub">{{ $t('login.unlockHint') }}</p>
+      <input v-model="unlockForm.password" type="password" :placeholder="$t('login.password')" @keyup.enter="unlockVault" />
+      <button class="btn-primary" @click="unlockVault">{{ $t('login.unlockSubmit') }}</button>
+      <div class="gate-links">
+        <button class="link" @click="logout">{{ $t('header.logout') }}</button>
+        <button class="link" @click="vaultRecovery = !vaultRecovery">{{ $t('login.recoverTitle') }}</button>
+      </div>
+      <!-- 密码曾被重置时的恢复路径：旧密码恢复（数据无损）或清空重建 -->
+      <div v-if="vaultRecovery" class="recovery">
+        <p class="sub">{{ $t('login.recoverHint') }}</p>
+        <input v-model="recoverForm.oldPassword" type="password" :placeholder="$t('login.recoverOldPassword')" />
+        <button class="btn-primary" @click="recoverVault">{{ $t('login.recoverSubmit') }}</button>
+        <button class="link" @click="resetVaultData">{{ $t('login.resetVault') }}</button>
+      </div>
+      <p v-if="unlockError" class="error">{{ unlockError }}</p>
+    </div>
+  </div>
+
   <!-- 主界面 -->
   <div v-else class="app">
     <header class="topbar">
@@ -97,6 +119,23 @@
         </button>
         <button v-if="isAdmin" :class="{ active: tab === 'logs' }" @click="switchTab('logs')">{{ $t('tabs.logs') }}</button>
         <button v-if="isAdmin" :class="{ active: tab === 'settings' }" @click="switchTab('settings')">{{ $t('tabs.settings') }}</button>
+        <button v-if="isAdmin" :class="{ active: tab === 'about' }" @click="switchTab('about')">{{ $t('tabs.about') }}</button>
+        <div class="sidebar-footer">
+          <button class="theme-toggle" @click="cycleTheme" :title="themeLabel">
+            <span class="theme-icon">{{ themeIcon }}</span>
+          </button>
+          <a
+            class="gh-link"
+            href="https://github.com/qingzhi-awa/cryptbox-fn"
+            target="_blank"
+            rel="noopener"
+            :title="$t('about.github')"
+          >
+            <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+            </svg>
+          </a>
+        </div>
       </nav>
 
       <div class="content">
@@ -122,10 +161,32 @@
       </div>
 
       <div class="list grid-list">
-        <div v-for="e in filtered" :key="e.id" class="entry">
+        <div
+          v-for="e in filtered"
+          :key="e.id"
+          class="entry"
+          :class="{ 'entry-pinned': e.pinned, 'entry-dragging': dragId === e.id, 'entry-drop-target': dragOverId === e.id && dragId !== e.id }"
+          :draggable="canDrag"
+          :title="canDrag ? $t('list.dragHint') : ''"
+          @dragstart="onDragStart(e)"
+          @dragover.prevent="onDragOver(e)"
+          @dragleave="onDragLeave(e)"
+          @drop.prevent="onDrop(e)"
+          @dragend="onDragEnd"
+        >
           <div class="entry-head">
-            <div class="title">{{ e.title }}</div>
+            <div class="title">
+              <span v-if="e.pinned" class="pin-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="12" height="12">
+                  <path d="M12 2l2.4 6.2 6.6.5-5 4.3 1.5 6.4L12 16l-5.5 3.4 1.5-6.4-5-4.3 6.6-.5z" fill="currentColor"></path>
+                </svg>
+              </span>
+              <span>{{ e.title }}</span>
+            </div>
             <div class="ops">
+              <button class="btn-ghost pin-btn" :class="{ 'pin-on': e.pinned }" @click="togglePin(e)">
+                {{ e.pinned ? $t('list.unpin') : $t('list.pin') }}
+              </button>
               <button class="btn-ghost" @click="startEdit(e)">{{ $t('list.edit') }}</button>
               <button class="btn-danger" @click="remove(e)">{{ $t('list.delete') }}</button>
             </div>
@@ -167,7 +228,7 @@
     <div v-if="tab === 'trash'" class="panel">
       <div class="toolbar">
         <div class="toolbar-main">
-          <button class="btn-danger" @click="emptyTrash">{{ $t('trash.emptyTrash') }}</button>
+          <button class="btn-danger" :disabled="trash.length === 0" @click="emptyTrash">{{ $t('trash.emptyTrash') }}</button>
         </div>
       </div>
       <div class="list grid-list">
@@ -184,6 +245,10 @@
               <span class="label">{{ $t('modal.username') }}:</span>
               <span class="field">{{ e.username || '—' }}</span>
             </div>
+            <div class="meta-line">
+              <span class="label">{{ $t('modal.url') }}:</span>
+              <span class="field">{{ e.url || $t('list.none') }}</span>
+            </div>
           </div>
         </div>
         <div v-if="trash.length === 0" class="empty">{{ $t('trash.empty') }}</div>
@@ -195,8 +260,9 @@
       <div class="toolbar">
         <button class="btn-primary" @click="openAddUser">{{ $t('users.add') }}</button>
         <div class="toolbar-sub">
+          <button class="btn-ghost hide-mobile" @click="exportUsers">{{ $t('users.export') }}</button>
           <button class="btn-ghost hide-mobile" @click="$refs.userFileInput.click()">{{ $t('users.import') }}</button>
-          <button class="btn-ghost hide-mobile" @click="downloadUserTemplate">{{ $t('users.template') }}</button>
+          <button class="btn-ghost hide-mobile" @click="downloadUserTemplate">{{ $t('users.templateBtn') }}</button>
           <input ref="userFileInput" type="file" accept=".csv,text/csv" style="display:none" @change="importUsersFile" />
         </div>
       </div>
@@ -235,7 +301,7 @@
             <div class="meta">
               <span>{{ l.detail }}</span>
               <span>{{ l.ip }}</span>
-              <span>{{ l.created_at }}</span>
+              <span>{{ formatLogTime(l.created_at) }}</span>
             </div>
           </div>
         </div>
@@ -384,12 +450,40 @@
         </div>
       </div>
     </div>
+
+    <!-- 关于 -->
+    <div v-if="tab === 'about'" class="panel">
+      <div class="about-card">
+        <div class="about-head">
+          <img :src="logoUrl" class="about-logo" alt="CryPtBox" />
+          <div class="about-info">
+            <p class="about-title">CryPtBox 密匣 - 飞牛OS第三方密码管理器</p>
+            <p class="about-line">作者：CryPtBox</p>
+            <p class="about-line">发布者：青芷</p>
+            <p class="about-line">当前版本：v{{ serverVersion || 'dev' }}</p>
+            <p class="about-line">官网链接：<a class="about-link" href="https://cryptbox.fnosp.com" target="_blank" rel="noopener">cryptbox.fnosp.com</a></p>
+            <p class="about-line">{{ $t('about.github') }}：<a class="about-link" href="https://github.com/qingzhi-awa/cryptbox-fn" target="_blank" rel="noopener">github.com/qingzhi-awa/cryptbox-fn</a></p>
+          </div>
+        </div>
+        <div class="about-divider" />
+        <p class="about-subtitle">{{ $t('about.changelog') }}</p>
+        <div class="about-changelog">
+          <div class="cl-item current">
+            <div class="cl-ver">v{{ changelog[0].v }}<span class="cl-tag">{{ $t('about.current') }}</span></div>
+            <ul class="cl-items">
+              <li v-for="(it, i) in changelog[0].items" :key="i">{{ it }}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
       </div>
     </div>
 
     <!-- 站点页脚 -->
     <footer class="site-footer">
       <p v-if="site.footer_text" class="footer-line">{{ site.footer_text }}</p>
+      <p v-if="serverVersion" class="footer-line footer-version">CryPtBox v{{ serverVersion }}</p>
     </footer>
 
     <!-- 全局提示 toast -->
@@ -514,9 +608,19 @@
 
 <script>
 import api from './api'
+import * as vault from './vault'
+import { parseCsvEntries, parseTxtEntries, normalizeEntry } from './importer'
+import logoUrl from './assets/logo.png'
+
+// 生成与 Go 端 time.RFC3339 一致的时间戳（秒级、UTC，无毫秒）。
+function nowRfc3339() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
 
 function csvEscape(v) {
   v = String(v == null ? '' : v)
+  // 公式注入防护：= + - @ 等开头的字段会被 Excel/WPS 当作公式执行，前置单引号强制按文本处理。
+  if (/^[=+\-@\t\r]/.test(v)) v = "'" + v
   if (/[",\n\r]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"'
   return v
 }
@@ -524,10 +628,55 @@ function csvEscape(v) {
 export default {
   data() {
     return {
+      logoUrl,
       token: sessionStorage.getItem('token') || '',
       sessionAuth: false,
       username: sessionStorage.getItem('username') || '',
       role: sessionStorage.getItem('role') || '',
+      // 端到端加密：vault key 仅存内存，刷新后需重新输入密码解锁。
+      vaultUnlocked: false,
+      // 主密钥派生盐：优先使用服务端下发的随机盐 kdf_salt；
+      // 历史账号该值为空，此时回退用用户名作盐（兼容既有数据）。
+      kdfSalt: '',
+      // 密码重置后的恢复模式：用旧密码恢复原密码库，或清空后重新开始。
+      vaultRecovery: false,
+      recoverForm: { oldPassword: '' },
+      // 更新日志（关于页展示；与当前版本相同的条目会高亮）。
+      changelog: [
+        { v: '0.2.34', items: ['新增账号级「置顶参与同步」开关，桌面端与网页端均可修改', '开启后置顶状态随密码库同步到所有设备；关闭时各端独立保存'] },
+        { v: '0.2.33', items: ['网页端条目支持置顶与拖拽排序', '置顶偏好按账号保存在服务端，与桌面端按设备置顶互不影响', '排序调整会随同步传播到桌面端'] },
+        { v: '0.2.32', items: ['桌面端条目支持置顶与拖拽排序', '网址与用户名栏改为掩码显示，与密码一致', '移除桌面端渲染层多余的对话框权限'] },
+        { v: '0.2.31', items: ['条目改用全局唯一标识归并，多设备同步不再互相覆盖丢数据', '改密码后此前签发的登录令牌立即失效', '加密密钥与 JWT 密钥移出数据库，改为数据目录下 0600 独立文件', 'SMTP 口令加密存储，配置导出对敏感字段掩码', '数据库文件权限自动收紧为 0600'] },
+        { v: '0.2.30', items: ['客户端同步默认改用 HTTPS，并新增服务器证书指纹校验（防中间人）', '同步密钥改由系统凭据库保管，不再明文落库', '新增 GET /api/fingerprint 证书指纹接口'] },
+        { v: '0.2.29', items: ['修复多账号同步相互冲突的问题', '升级前自动备份数据库', '超级管理员口令要求更严（≥10 位且含字母数字）', '未登录请求不再返回精确版本号'] },
+        { v: '0.2.28', items: ['修复主题按钮宽度被侧栏样式覆盖的问题'] },
+        { v: '0.2.27', items: ['侧栏底部按钮收紧至图标宽度'] },
+        { v: '0.2.26', items: ['侧栏底部按钮布局微调'] },
+        { v: '0.2.25', items: ['主题切换按钮精简为图标，新增 GitHub 入口', '关于页新增官网与开源地址链接'] },
+        { v: '0.2.24', items: ['新增颜色模式切换（自动 / 浅色 / 深色）', '回收站条目显示网址', '导入模板示例内容跟随语言', '关于页布局优化，更新日志仅显示最新版本'] },
+        { v: '0.2.23', items: ['导入模板区分密码/用户并附带示例内容'] },
+        { v: '0.2.22', items: ['新增「导出用户」（CSV，不含密码）', '新增「关于」页'] },
+        { v: '0.2.21', items: ['回收站为空时「清空回收站」置灰', '操作日志时间显示为本地时区'] },
+        { v: '0.2.20', items: ['HTTP 访问直接可用（移除加密引导页）'] },
+        { v: '0.2.19', items: ['移除降级模式常驻提示条'] },
+        { v: '0.2.18', items: ['修复非加密模式下的页面异常'] },
+        { v: '0.2.17', items: ['内嵌入口优化'] },
+        { v: '0.2.16', items: ['支持证书下载导入'] },
+        { v: '0.2.15', items: ['内嵌入口改为直连访问'] },
+        { v: '0.2.14', items: ['入口带版本参数防缓存', '新增 API 访问日志（info.log）'] },
+        { v: '0.2.13', items: ['页面禁缓存策略', '界面底部显示版本号'] },
+        { v: '0.2.12', items: ['写操作兼容飞牛网关（POST 入口）'] },
+        { v: '0.2.11', items: ['修复修改密码后密码库无法解锁', '增强旧密码恢复'] },
+        { v: '0.2.10', items: ['兼容飞牛统一网关登录（双通道鉴权）'] },
+        { v: '0.2.9', items: ['内嵌入口接入统一网关'] },
+        { v: '0.2.7', items: ['内嵌入口支持 HTTPS'] },
+        { v: '0.2.6', items: ['同一端口同时兼容 HTTP 与 HTTPS'] },
+        { v: '0.2.5', items: ['默认启用 HTTPS（首次启动自动生成证书）'] },
+        { v: '0.2.4', items: ['安全加固：验证码防穷举、登录锁定、全局限流', '令牌有效期收敛至 24 小时', '新增密码库恢复（旧密码恢复 / 清空重建）'] }
+      ],
+      unlockForm: { password: '' },
+      unlockError: '',
+      allEntries: [],
       myId: 0,
       meEmail: '',
       myAvatar: '',
@@ -538,6 +687,8 @@ export default {
       isAdminLogin: location.pathname.startsWith('/admin-login'),
       gateMode: 'login',
       initialized: true,
+      // 服务端版本号（/api/status 下发），显示在页脚用于确认版本与前端刷新状态。
+      serverVersion: '',
       verifyMode: 'none',
       regForm: { username: '', email: '', password: '', code: '' },
       resetForm: { email: '', code: '', password: '' },
@@ -549,12 +700,16 @@ export default {
       testEmail: '',
       site: { footer_text: '' },
       allowReg: false,
+      recycleEnabled: true,
       portAuto: true,
       settingsSecureMode: 'ssl',
       entries: [],
       trash: [],
       search: '',
       revealed: new Set(),
+      // 拖拽排序状态：dragId 为被拖动条目，dragOverId 为当前悬停目标。
+      dragId: null,
+      dragOverId: null,
       editing: null,
       form: this.emptyForm(),
       formShow: false,
@@ -569,16 +724,30 @@ export default {
       meForm: { username: '', email: '', current_password: '', new_password: '' },
       importFormat: '',
       ioFormat: '',
-      lang: localStorage.getItem('locale') || 'zh-CN'
+      lang: localStorage.getItem('locale') || 'zh-CN',
+      // 颜色模式：auto（跟随系统）/ light / dark，循环切换。
+      themeMode: localStorage.getItem('theme') || 'auto'
     }
   },
   computed: {
+    themeIcon() {
+      return this.themeMode === 'light' ? '☀️' : this.themeMode === 'dark' ? '🌙' : '🌗'
+    },
+    themeLabel() {
+      const key = this.themeMode === 'light' ? 'theme.light' : this.themeMode === 'dark' ? 'theme.dark' : 'theme.auto'
+      return this.$t(key)
+    },
     filtered() {
       const q = this.search.trim().toLowerCase()
       if (!q) return this.entries
       return this.entries.filter((e) =>
         [e.title, e.username, e.url, e.category].some((s) => (s || '').toLowerCase().includes(q))
       )
+    },
+    // 拖拽排序：仅在未搜索（列表即完整顺序）且条目多于一条时启用，
+    // 否则拖动的只是筛选结果，落库顺序会与所见不符。
+    canDrag() {
+      return !this.search.trim() && this.entries.length > 1
     },
     isAdmin() {
       return this.role === 'admin' || this.role === 'superadmin'
@@ -624,6 +793,8 @@ export default {
     try {
       const st = await api.status()
       this.initialized = st.initialized
+      // 版本号在认证后由 /api/me 下发并显示在页脚（此处仅取初始化状态：
+      // 未认证请求不暴露精确版本号，只返回用于前端自检的 build 摘要）。
       if (!st.initialized) this.gateMode = 'setup'
     } catch (e) {
       /* ignore */
@@ -647,23 +818,81 @@ export default {
       this.$i18n.locale = this.lang
       localStorage.setItem('locale', this.lang)
     },
+    // 颜色模式循环切换：自动（跟随系统）→ 浅色 → 深色 → 自动。
+    cycleTheme() {
+      const order = ['auto', 'light', 'dark']
+      const next = order[(order.indexOf(this.themeMode) + 1) % order.length]
+      this.themeMode = next
+      try {
+        localStorage.setItem('theme', next)
+      } catch (e) {
+        /* ignore */
+      }
+      this.applyTheme()
+    },
+    applyTheme() {
+      let resolved = this.themeMode
+      if (resolved === 'auto') {
+        try {
+          resolved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        } catch (e) {
+          resolved = 'light'
+        }
+      }
+      document.documentElement.setAttribute('data-theme', resolved)
+    },
     fieldName(key) {
       return this.$t(key).replace(' *', '')
     },
+    // 日志时间显示：服务端（SQLite CURRENT_TIMESTAMP）存的是 UTC，
+    // 这里补上 Z 标记交给 Date 转换为浏览器所在时区的本地时间显示。
+    formatLogTime(s) {
+      if (!s) return ''
+      const d = new Date(String(s).replace(' ', 'T') + (/[Zz]|[+-]\d{2}:?\d{2}$/.test(String(s)) ? '' : 'Z'))
+      if (isNaN(d.getTime())) return String(s)
+      const p = (n) => String(n).padStart(2, '0')
+      return (
+        d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+        ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+      )
+    },
     async init() {
-      try {
-        const me = await api.me(this.token)
-        this.username = me.username
-        this.role = me.role
-        this.myId = me.id
-        this.meEmail = me.email || ''
-        this.myAvatar = me.avatar || ''
-        await this.loadEntries()
-        if (this.isAdmin) await this.loadUsers()
-      } catch (e) {
-        this.clearAuth()
-        this.error = String(e.message || e)
+      // 优先用本地 token；经飞牛统一网关内嵌打开时 Authorization 头会被网关剥离，
+      // 因此失败或返回异常时回退到同源会话 Cookie（登录时由服务端下发，HttpOnly）。
+      let me = null
+      let lastErr = null
+      const candidates = this.token ? [this.token, ''] : ['']
+      for (const tok of candidates) {
+        try {
+          const r = await api.me(tok)
+          if (r && r.username) {
+            me = r
+            break
+          }
+          lastErr = new Error(this.$t('msg.sessionInvalid'))
+        } catch (e) {
+          lastErr = e
+        }
       }
+      if (!me) {
+        this.clearAuth()
+        this.error = lastErr ? String(lastErr.message || lastErr) : ''
+        return
+      }
+      // 无本地 token 而能取到用户信息，说明身份来自会话 Cookie（网关直通场景）。
+      this.sessionAuth = !this.token
+      this.username = me.username
+      this.role = me.role
+      this.myId = me.id
+      this.meEmail = me.email || ''
+      this.myAvatar = me.avatar || ''
+      this.vaultKeyEnc = me.vault_key_enc || ''
+      this.kdfSalt = me.kdf_salt || ''
+      // 版本号由已认证接口下发（未认证的 /api/status 只给 build 摘要）。
+      this.serverVersion = me.version || this.serverVersion
+      // vault key 仅存内存：刷新后 token 仍在，但需重新输入密码解锁后才能读取密码条目。
+      if (this.vaultUnlocked) await this.loadVault()
+      if (this.isAdmin) await this.loadUsers()
     },
     async trySession() {
       // 无本地 token 时，尝试免 token 拉取 /api/me；此时浏览器会自动带上登录时下发的 HttpOnly Cookie，
@@ -677,7 +906,11 @@ export default {
         this.myId = me.id
         this.meEmail = me.email || ''
         this.myAvatar = me.avatar || ''
-        await this.loadEntries()
+        this.vaultKeyEnc = me.vault_key_enc || ''
+        this.kdfSalt = me.kdf_salt || ''
+        // 版本号由已认证接口下发（未认证的 /api/status 只给 build 摘要）。
+        this.serverVersion = me.version || this.serverVersion
+        if (this.vaultUnlocked) await this.loadVault()
         if (this.isAdmin) await this.loadUsers()
       } catch (e) {
         /* 未登录：保持登录页 */
@@ -688,6 +921,7 @@ export default {
         const r = await api.publicSettings()
         this.verifyMode = r.email_verify_mode || 'none'
         this.allowReg = !!r.allow_registration
+        this.recycleEnabled = r.recycle !== false
         // 服务端默认语言：仅当用户尚未手动选择过语言时采用（安装向导选择的默认语言）
         if (!localStorage.getItem('locale') && r.default_language) {
           this.lang = r.default_language
@@ -709,12 +943,27 @@ export default {
     async doSetup() {
       this.error = ''
       try {
-        const r = await api.setup(this.setupForm.username, this.setupForm.password)
+        // 初始化时即生成 vault key，用 master key 加密后随注册请求一并写入，避免二次交互。
+        const { vaultKey, vaultKeyEnc, kdfSalt } = await this.buildNewVault(this.setupForm.password)
+        const r = await api.setup(this.setupForm.username, this.setupForm.password, vaultKeyEnc, kdfSalt)
         this.applyAuth(r)
+        vault.setVaultKey(vaultKey)
+        this.vaultUnlocked = true
+        this.vaultKeyEnc = vaultKeyEnc
         await this.init()
       } catch (e) {
         this.error = String(e.message || e)
       }
+    },
+    // 生成新的派生盐与 vault key，并返回用 master key 加密后的 vault key 密文。
+    async buildNewVault(password) {
+      if (!vault.hasCrypto()) throw new Error(this.$t('msg.cryptoUnavailable'))
+      // 随机派生盐，随账号一并上传，避免「以用户名作盐」在改名后导致数据无法解密。
+      const kdfSalt = vault.newSalt()
+      const masterKey = await vault.deriveMasterKey(password, kdfSalt)
+      const vaultKey = vault.randomBytes(32)
+      const vaultKeyEnc = await vault.encryptVaultKey(masterKey, vaultKey)
+      return { vaultKey, vaultKeyEnc, kdfSalt }
     },
     async sendRegCode() {
       this.error = ''
@@ -737,8 +986,12 @@ export default {
     async register() {
       this.error = ''
       try {
-        const r = await api.register(this.regForm)
+        const { vaultKey, vaultKeyEnc, kdfSalt } = await this.buildNewVault(this.regForm.password)
+        const r = await api.register({ ...this.regForm, vault_key_enc: vaultKeyEnc, kdf_salt: kdfSalt })
         this.applyAuth(r)
+        vault.setVaultKey(vaultKey)
+        this.vaultUnlocked = true
+        this.vaultKeyEnc = vaultKeyEnc
         await this.init()
       } catch (e) {
         this.error = String(e.message || e)
@@ -759,6 +1012,8 @@ export default {
       this.token = r.token
       this.username = r.username
       this.role = r.role
+      this.vaultKeyEnc = r.vault_key_enc || ''
+      this.kdfSalt = r.kdf_salt || ''
       sessionStorage.setItem('token', r.token)
       sessionStorage.setItem('username', r.username)
       sessionStorage.setItem('role', r.role)
@@ -772,20 +1027,146 @@ export default {
           return
         }
         this.applyAuth(r)
+        // 登录时已持有账号密码，直接派生 master key 解锁密码库。
+        await this.unlockWithPassword(this.loginForm.password, r.kdf_salt || r.username, r.vault_key_enc)
+        // 历史账号首次启用端到端加密时，先把服务端静态密钥加密的旧数据迁移过来。
+        await this.migrateLegacy()
         await this.init()
       } catch (e) {
         this.error = String(e.message || e)
       }
     },
-    lock() {
-      this.menuOpen = false
-      this.clearAuth()
-      this.entries = []
-      this.users = []
+    // 用账号密码派生 master key，解密（或首次创建）vault key。
+    // salt 由调用方传入：优先 kdf_salt，历史账号回退用户名。
+    async unlockWithPassword(password, salt, vaultKeyEnc) {
+      if (!vault.hasCrypto()) throw new Error(this.$t('msg.cryptoUnavailable'))
+      const masterKey = await vault.deriveMasterKey(password, salt)
+      let vk
+      if (!vaultKeyEnc) {
+        // 首次启用端到端加密（含历史账号）：生成 vault key 并上传。
+        vk = vault.randomBytes(32)
+        const enc = await vault.encryptVaultKey(masterKey, vk)
+        await api.putVaultKey(enc, this.token)
+        this.vaultKeyEnc = enc
+      } else {
+        vk = await vault.decryptVaultKey(masterKey, vaultKeyEnc)
+        this.vaultKeyEnc = vaultKeyEnc
+      }
+      vault.setVaultKey(vk)
+      this.vaultUnlocked = true
     },
-    logout() {
+    // 解锁门（页面刷新后 token 仍在但内存中的 vault key 已丢失）。
+    async unlockVault() {
+      this.unlockError = ''
+      try {
+        await this.unlockWithPassword(this.unlockForm.password, this.kdfSalt || this.username, this.vaultKeyEnc)
+        this.unlockForm.password = ''
+        this.vaultRecovery = false
+        await this.migrateLegacy()
+        await this.loadVault()
+        if (this.isAdmin) await this.loadUsers()
+      } catch (e) {
+        this.unlockError = this.$t('login.unlockFailed')
+      }
+    },
+    // 密码被重置后的恢复路径：用旧密码解开旧 vault key，再用当前（新）密码重新包裹上传。
+    // 全程在本地完成密钥运算，服务端只存新的 vault_key_enc，原密码库数据无损。
+    async recoverVault() {
+      this.unlockError = ''
+      try {
+        if (!vault.hasCrypto()) throw new Error(this.$t('msg.cryptoUnavailable'))
+        if (!this.vaultKeyEnc) throw new Error('no vault key to recover')
+        if (!this.unlockForm.password || !this.recoverForm.oldPassword) {
+          this.unlockError = this.$t('login.recoverNeedBoth')
+          return
+        }
+        // 依次尝试候选派生盐：当前随机盐 → 用户名（历史账号或以用户名作盐时的包裹方式）。
+        // 这样即使派生盐曾被改动，只要旧密码 + 旧盐仍能解开 vault key，数据就能救回。
+        const candidates = []
+        for (const s of [this.kdfSalt, this.username]) {
+          const v = (s || '').trim()
+          if (v && !candidates.includes(v)) candidates.push(v)
+        }
+        let vk = null
+        let usedSalt = ''
+        for (const s of candidates) {
+          try {
+            const oldMaster = await vault.deriveMasterKey(this.recoverForm.oldPassword, s)
+            vk = await vault.decryptVaultKey(oldMaster, this.vaultKeyEnc)
+            usedSalt = s
+            break
+          } catch (e) {
+            /* 换下一个候选盐重试 */
+          }
+        }
+        if (!vk) {
+          this.unlockError = this.$t('login.recoverFailed')
+          return
+        }
+        // 重新包裹：使用服务端当前记录的派生盐，避免盐与密文再次不一致。
+        const salt = this.kdfSalt || usedSalt
+        const newMaster = await vault.deriveMasterKey(this.unlockForm.password, salt)
+        const enc = await vault.encryptVaultKey(newMaster, vk)
+        await api.putVaultKey(enc, this.token)
+        this.vaultKeyEnc = enc
+        vault.setVaultKey(vk)
+        this.vaultRecovery = false
+        this.recoverForm.oldPassword = ''
+        this.unlockForm.password = ''
+        this.unlockError = ''
+        this.vaultUnlocked = true
+        await this.migrateLegacy()
+        await this.loadVault()
+        if (this.isAdmin) await this.loadUsers()
+      } catch (e) {
+        // 旧密码错误（解密失败）或网络异常
+        this.unlockError = this.$t('login.recoverFailed')
+      }
+    },
+    // 放弃旧密码库：清空服务端条目密文并重置 vault key，之后用新密码重新开始。
+    // 旧密文删除后不可恢复，需用户确认。
+    async resetVaultData() {
+      if (!window.confirm(this.$t('login.resetVaultConfirm'))) return
+      this.unlockError = ''
+      try {
+        await api.deleteVault(this.token)
+        this.vaultKeyEnc = ''
+        this.vaultRecovery = false
+        this.recoverForm.oldPassword = ''
+        // vault_key_enc 已置空：unlockWithPassword 会生成新 vault key 并上传。
+        await this.unlockWithPassword(this.unlockForm.password, this.kdfSalt || this.username, '')
+        this.unlockForm.password = ''
+        this.unlockError = ''
+        this.vaultUnlocked = true
+        await this.loadVault()
+        if (this.isAdmin) await this.loadUsers()
+      } catch (e) {
+        this.unlockError = String(e.message || e)
+      }
+    },
+    lock() {
+      // 仅锁定密码库：保留登录会话，清空内存中的 vault key，需重新输入账号密码解锁。
+      this.menuOpen = false
+      this.vaultUnlocked = false
+      vault.clearVaultKey()
+      this.entries = []
+      this.trash = []
+      this.allEntries = []
+      this.users = []
+      this.unlockError = ''
+      this.unlockForm.password = ''
+    },
+    async logout() {
+      // 会话 Cookie 是 HttpOnly 的，只能由服务端清除（失败也不影响本地登出）。
+      try {
+        await api.logout(this.token)
+      } catch (e) {
+        /* ignore */
+      }
       this.clearAuth()
       this.entries = []
+      this.trash = []
+      this.allEntries = []
       this.users = []
     },
     clearAuth() {
@@ -793,6 +1174,10 @@ export default {
       this.sessionAuth = false
       this.username = ''
       this.role = ''
+      this.vaultUnlocked = false
+      this.vaultKeyEnc = ''
+      this.kdfSalt = ''
+      vault.clearVaultKey()
       sessionStorage.removeItem('token')
       sessionStorage.removeItem('username')
       sessionStorage.removeItem('role')
@@ -803,49 +1188,170 @@ export default {
       this.msg = ''
       if (t === 'logs') this.loadLogs()
       if (t === 'settings') this.loadSettings()
-      if (t === 'trash') this.loadTrash()
     },
-    async loadEntries() {
-      const r = await api.listEntries(this.token)
-      this.entries = r.entries || []
+    // 拉取整库并本地解密：password / notes 为密文，其余字段为明文元数据。
+    // 同时取回网页端置顶偏好（失败不阻塞使用，仅退化为不置顶）。
+    async loadVault() {
+      const r = await api.getVault(this.token)
+      const list = await vault.decryptEntries(r.entries || [])
+      this.allEntries = list
+      this.applyEntryView()
+      if (list.some((e) => e.decryptFailed)) {
+        this.error = this.$t('msg.decryptFailed')
+      }
     },
-    async loadTrash() {
+    applyEntryView() {
+      // 置顶条目固定在最前，其后按同步的 sort_order 排列。
+      const pinRank = (e) => (e.pinned ? 0 : 1)
+      this.entries = this.allEntries
+        .filter((e) => !e.deleted)
+        .sort(
+          (a, b) => pinRank(a) - pinRank(b) || a.sort_order - b.sort_order || a.id - b.id
+        )
+      this.trash = this.allEntries.filter((e) => e.deleted)
+    },
+    // 整库加密后上传（端到端加密的唯一写路径）。
+    // 上传后回拉一次：服务端会为新条目分配 uuid（置顶偏好按 uuid 记录）。
+    async pushVault() {
+      const encrypted = await vault.encryptEntries(this.allEntries)
+      await api.putVault(encrypted, this.token)
+      await this.loadVault()
+    },
+    // 网页端置顶：写入服务端按账号保存的偏好，不影响桌面端的按设备置顶。
+    async togglePin(e) {
+      if (!e.uuid) {
+        this.error = this.$t('msg.pinNeedSave')
+        return
+      }
       try {
-        const r = await api.listTrash(this.token)
-        this.trash = r.entries || []
+        e.pinned = !e.pinned
+        await this.pushVault()
+        this.msg = this.$t(e.pinned ? 'msg.pinned' : 'msg.unpinned')
+      } catch (err) {
+        this.error = String(err.message || err)
+        await this.loadVault()
+      }
+    },
+    onDragStart(e) {
+      if (!this.canDrag) return
+      this.dragId = e.id
+    },
+    onDragOver(e) {
+      if (this.dragId != null && this.dragId !== e.id) this.dragOverId = e.id
+    },
+    onDragLeave(e) {
+      if (this.dragOverId === e.id) this.dragOverId = null
+    },
+    onDragEnd() {
+      this.dragId = null
+      this.dragOverId = null
+    },
+    // 拖拽落点：在可见顺序中把被拖条目移动到目标位置；置顶组与普通组之间禁止互拖
+    // （列表规则是置顶永远在前，跨组拖动只会被排序规则弹回）。
+    async onDrop(target) {
+      const from = this.dragId
+      this.dragId = null
+      this.dragOverId = null
+      if (from == null || from === target.id) return
+      const list = this.entries.slice()
+      const fi = list.findIndex((x) => x.id === from)
+      const ti = list.findIndex((x) => x.id === target.id)
+      if (fi < 0 || ti < 0) return
+      const fp = !!list[fi].pinned
+      const tp = !!list[ti].pinned
+      if (fp !== tp) {
+        this.error = this.$t('msg.pinGroupLocked')
+        return
+      }
+      const [moved] = list.splice(fi, 1)
+      list.splice(ti, 0, moved)
+      // 组内重排序号：置顶组与普通组各自连续，落库后随同步传播到桌面端。
+      let p = 0
+      let u = 0
+      for (const e of list) {
+        if (e.pinned) e.sort_order = ++p
+        else e.sort_order = ++u
+      }
+      try {
+        await this.pushVault()
+      } catch (err) {
+        this.error = String(err.message || err)
+        await this.loadVault()
+      }
+    },
+    renumber() {
+      this.allEntries
+        .filter((e) => !e.deleted)
+        .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
+        .forEach((e, i) => {
+          e.sort_order = i + 1
+        })
+    },
+    nextId() {
+      return this.allEntries.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1
+    },
+    // 旧数据迁移：服务端历史上用静态密钥加密的条目，取回明文后用 vault key 重新加密。
+    async migrateLegacy() {
+      try {
+        const r = await api.getLegacy(this.token)
+        const legacy = r.entries || []
+        if (legacy.length === 0) return
+        const map = new Map(legacy.map((e) => [e.id, e]))
+        const cipher = await api.getVault(this.token)
+        const vk = vault.getVaultKey()
+        const out = []
+        for (const e of cipher.entries || []) {
+          const old = map.get(e.id)
+          if (!old) {
+            // 已是端到端密文，原样保留。
+            out.push(e)
+            continue
+          }
+          // 旧数据：服务端取回的明文，用 vault key 重新加密后再上传。
+          out.push({
+            ...e,
+            password: await vault.encryptString(vk, old.password || ''),
+            notes: await vault.encryptString(vk, old.notes || '')
+          })
+        }
+        await api.putVault(out, this.token)
+        this.msg = this.$t('msg.migrated', { n: legacy.length })
       } catch (e) {
-        this.error = String(e.message || e)
+        /* 迁移失败不阻塞使用，下次解锁会重试 */
       }
     },
     async restoreEntry(id) {
       try {
-        await api.restoreEntry(id, this.token)
+        const e = this.allEntries.find((x) => x.id === id)
+        if (!e) return
+        e.deleted = false
+        e.sort_order = this.nextId()
+        this.renumber()
+        await this.pushVault()
         this.msg = this.$t('trash.restored')
-        await this.loadTrash()
-        await this.loadEntries()
-      } catch (e) {
-        this.error = String(e.message || e)
+      } catch (err) {
+        this.error = String(err.message || err)
       }
     },
     async purgeEntry(id) {
       this.askConfirm(this.$t('trash.confirmPurge'), async () => {
         try {
-          await api.purgeEntry(id, this.token)
+          this.allEntries = this.allEntries.filter((e) => e.id !== id)
+          await this.pushVault()
           this.msg = this.$t('trash.purged')
-          await this.loadTrash()
-        } catch (e) {
-          this.error = String(e.message || e)
+        } catch (err) {
+          this.error = String(err.message || err)
         }
       })
     },
     async emptyTrash() {
       this.askConfirm(this.$t('trash.confirmEmpty'), async () => {
         try {
-          await api.emptyTrash(this.token)
+          this.allEntries = this.allEntries.filter((e) => !e.deleted)
+          await this.pushVault()
           this.msg = this.$t('trash.emptied')
-          this.trash = []
-        } catch (e) {
-          this.error = String(e.message || e)
+        } catch (err) {
+          this.error = String(err.message || err)
         }
       })
     },
@@ -1033,11 +1539,25 @@ export default {
         return
       }
       try {
-        if (this.form.id) await api.updateEntry(this.form, this.token)
-        else await api.createEntry(this.form, this.token)
+        const now = nowRfc3339()
+        if (this.form.id) {
+          const i = this.allEntries.findIndex((x) => x.id === this.form.id)
+          if (i >= 0) this.allEntries[i] = { ...this.allEntries[i], ...this.form, updated_at: now }
+        } else {
+          const id = this.nextId()
+          this.allEntries.push({
+            ...normalizeEntry(this.form),
+            id,
+            sort_order: id,
+            created_at: now,
+            updated_at: now,
+            deleted: false
+          })
+        }
+        this.renumber()
+        await this.pushVault()
         this.editing = null
         this.msg = this.$t('msg.saved')
-        await this.loadEntries()
       } catch (e) {
         this.error = String(e.message || e)
       }
@@ -1069,9 +1589,20 @@ export default {
     async remove(e) {
       this.askConfirm(this.$t('msg.confirmDelete', { title: e.title }), async () => {
         try {
-          await api.deleteEntry(e.id, this.token)
+          if (this.recycleEnabled) {
+            // 走回收站：打墓碑标记并保留密文，便于恢复。
+            const item = this.allEntries.find((x) => x.id === e.id)
+            if (item) {
+              item.deleted = true
+              item.sort_order = 0
+              item.updated_at = nowRfc3339()
+            }
+          } else {
+            this.allEntries = this.allEntries.filter((x) => x.id !== e.id)
+          }
+          this.renumber()
+          await this.pushVault()
           this.msg = this.$t('msg.deleted')
-          await this.loadEntries()
         } catch (err) {
           this.error = String(err.message || err)
         }
@@ -1118,10 +1649,24 @@ export default {
       const f = this.importFormat
       if (!file) return
       try {
-        const text = await file.text()
-        const r = f === 'txt' ? await api.importText(text, this.token) : await api.importEntries(text, this.token)
-        this.msg = this.$t('msg.imported', { n: r.count })
-        await this.loadEntries()
+        // 浏览器本地解析（兼容 UTF-8 / GBK），明文不经过服务端。
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        const parsed = f === 'txt' ? parseTxtEntries(bytes) : parseCsvEntries(bytes)
+        const now = nowRfc3339()
+        for (const item of parsed) {
+          const id = this.nextId()
+          this.allEntries.push({
+            ...normalizeEntry(item),
+            id,
+            sort_order: id,
+            created_at: now,
+            updated_at: now,
+            deleted: false
+          })
+        }
+        this.renumber()
+        await this.pushVault()
+        this.msg = this.$t('msg.imported', { n: parsed.length })
       } catch (err) {
         this.error = String(err.message || err)
       } finally {
@@ -1149,7 +1694,9 @@ export default {
     downloadTemplate() {
       const keys = ['title', 'username', 'password', 'url', 'category', 'notes']
       const header = keys.map((k) => this.fieldName('modal.' + k)).join(',')
-      const csv = '\ufeff' + header + '\r\n'
+      // 附带一条示例数据（文案跟随应用语言），导入后可直接看到各列含义（密码建议导入前自行替换）。
+      const example = [this.$t('tpl.site'), this.$t('tpl.user'), this.$t('tpl.pass'), this.$t('tpl.url'), this.$t('tpl.category'), this.$t('tpl.notes')]
+      const csv = '\ufeff' + header + '\r\n' + example.map(csvEscape).join(',') + '\r\n'
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -1157,7 +1704,6 @@ export default {
       a.download = this.$t('app.title') + ' - ' + this.$t('file.template') + '.csv'
       a.click()
       URL.revokeObjectURL(url)
-      this.msg = this.$t('msg.saved')
     },
     openAddUser() {
       this.userError = ''
@@ -1191,7 +1737,9 @@ export default {
     downloadUserTemplate() {
       const keys = ['username', 'password', 'email', 'role']
       const header = keys.map((k) => this.$t('users.' + k)).join(',')
-      const csv = '\ufeff' + header + '\r\n'
+      // 附带一条示例数据（文案跟随应用语言）：role 支持「普通用户 / 管理员」，留空默认普通用户。
+      const example = [this.$t('tpl.uName'), this.$t('tpl.uPass'), this.$t('tpl.uEmail'), this.$t('tpl.uRole')]
+      const csv = '\ufeff' + header + '\r\n' + example.map(csvEscape).join(',') + '\r\n'
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -1199,6 +1747,23 @@ export default {
       a.download = this.$t('app.title') + ' - ' + this.$t('users.template') + '.csv'
       a.click()
       URL.revokeObjectURL(url)
+    },
+    // 导出当前用户列表（CSV，含 ID/用户名/邮箱/角色/状态/创建时间；不含密码等敏感字段）。
+    exportUsers() {
+      const header = ['ID', this.$t('users.username'), this.$t('users.email'), this.$t('users.role'), this.$t('users.statusLabel') || '状态', this.$t('users.createdAt') || '创建时间']
+      const rows = [header.map(csvEscape).join(',')]
+      for (const u of this.users) {
+        rows.push([u.id, u.username, u.email || '', this.roleLabel(u.role), u.status, this.formatLogTime(u.created_at)].map(csvEscape).join(','))
+      }
+      const csv = '\ufeff' + rows.join('\r\n')
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = this.$t('app.title') + ' - ' + this.$t('users.export') + '.csv'
+      a.click()
+      URL.revokeObjectURL(url)
+      this.msg = this.$t('msg.userExported', { n: this.users.length })
     },
     async importUsersFile(e) {
       const file = e.target.files && e.target.files[0]
@@ -1281,12 +1846,55 @@ export default {
     },
     async saveMe() {
       try {
-        await api.updateMe(this.meForm, this.token)
+        // 主密钥由账号密码 + 派生盐得出：密码变更（或老账号的用户名变更）后，
+        // 必须用新的 master key 重新包裹 vault key，且与密码变更在同一请求内提交。
+        // 若当前未解锁，本页无法重新包裹 —— 此时必须拒绝操作，否则旧密文将永久无法解密。
+        const oldUsername = this.username
+        const changing = !!(this.meForm.new_password || this.meForm.username !== oldUsername)
+        let vk = null
+        if (changing && this.vaultKeyEnc && !this.vaultUnlocked) {
+          this.error = this.$t('msg.unlockRequiredForCredentialChange')
+          return
+        }
+        if (changing && this.vaultUnlocked && this.vaultKeyEnc) {
+          const oldMaster = await vault.deriveMasterKey(this.meForm.current_password, this.kdfSalt || oldUsername)
+          vk = await vault.decryptVaultKey(oldMaster, this.vaultKeyEnc)
+        }
+        // 组装与密码变更同批提交的新盐与新 vault_key_enc。
+        let newSalt = this.kdfSalt
+        this.meForm.kdf_salt = ''
+        this.meForm.vault_key_enc = ''
+        if (changing && vk) {
+          if (!newSalt) newSalt = vault.newSalt()
+          const newPassword = this.meForm.new_password || this.meForm.current_password
+          const newMaster = await vault.deriveMasterKey(newPassword, newSalt)
+          const enc = await vault.encryptVaultKey(newMaster, vk)
+          this.meForm.kdf_salt = newSalt
+          this.meForm.vault_key_enc = enc
+        }
+        const upd = await api.updateMe(this.meForm, this.token)
+        // 改密后服务端递增令牌版本（旧令牌立即失效）并为当前会话重新签发，
+        // 这里必须先换用新令牌，否则后续请求会 401。
+        if (upd && upd.token) {
+          this.token = upd.token
+          sessionStorage.setItem('token', upd.token)
+        }
+        if (this.meForm.vault_key_enc) {
+          this.vaultKeyEnc = this.meForm.vault_key_enc
+          this.kdfSalt = this.meForm.kdf_salt
+        }
+        this.meForm.current_password = ''
+        this.meForm.new_password = ''
+        this.meForm.kdf_salt = ''
+        this.meForm.vault_key_enc = ''
         this.showMe = false
         this.msg = this.$t('msg.meUpdated')
         const me = await api.me(this.token)
         this.username = me.username
         this.meEmail = me.email || ''
+        // 以服务端记录为准回读派生盐与密文，确保本地与库内状态一致（避免再次漂移）。
+        this.kdfSalt = me.kdf_salt || this.kdfSalt
+        this.vaultKeyEnc = me.vault_key_enc || this.vaultKeyEnc
         sessionStorage.setItem('username', me.username)
       } catch (e) {
         this.error = String(e.message || e)
@@ -1337,6 +1945,14 @@ export default {
   justify-content: space-between;
   gap: 8px;
 }
+.recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid #eee;
+}
 .link {
   background: transparent;
   color: var(--fnos-primary);
@@ -1353,6 +1969,104 @@ export default {
 .code-row button {
   flex-shrink: 0;
   width: auto;
+}
+/* 禁用态按钮（如回收站为空时的「清空回收站」）：灰显且不可点击 */
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* 关于页：logo 居中，信息在下 */
+.about-card {
+  max-width: 560px;
+  margin: 32px auto;
+  padding: 28px 32px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+.about-head {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.about-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  flex-shrink: 0;
+}
+.about-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  color: #374151;
+}
+.about-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 2px;
+}
+.about-line {
+  margin: 0;
+}
+.about-divider {
+  width: 100%;
+  height: 1px;
+  background: #e5e7eb;
+  margin: 20px 0 12px;
+}
+.about-subtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 8px;
+  align-self: flex-start;
+}
+.about-changelog {
+  width: 100%;
+  max-height: 240px;
+  overflow-y: auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.cl-item {
+  font-size: 12.5px;
+  color: #6b7280;
+}
+.cl-item.current .cl-ver {
+  color: var(--fnos-primary, #2563eb);
+  font-weight: 700;
+}
+.cl-ver {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 2px;
+}
+.cl-tag {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 0 8px;
+}
+.cl-items {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .inline {
   margin: 8px 0;
@@ -1512,6 +2226,57 @@ export default {
   color: var(--fnos-primary);
   background: var(--fnos-primary-light);
   font-weight: 600;
+}
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 用 .sidebar button.theme-toggle 提高优先级，避免被 .sidebar button 的 width:100% 覆盖 */
+.sidebar button.theme-toggle {
+  width: 18px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: #6b7280;
+  border-radius: 4px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+.theme-toggle:hover {
+  background: #f3f4f6;
+}
+.theme-icon {
+  font-size: 16px;
+}
+.gh-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 36px;
+  border-radius: 4px;
+  color: #6b7280;
+  flex-shrink: 0;
+}
+.gh-link:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+.about-link {
+  color: var(--fnos-primary);
+  text-decoration: none;
+  word-break: break-all;
+}
+.about-link:hover {
+  text-decoration: underline;
 }
 .content {
   flex: 1;
@@ -1951,5 +2716,102 @@ a.footer-link:hover {
   .hide-mobile {
     display: none;
   }
+}
+
+/* ===== 深色主题：组件级表面与文字覆盖（全局部分见 style.css） ===== */
+html[data-theme='dark'] .gate-card,
+html[data-theme='dark'] .modal,
+html[data-theme='dark'] .settings-card,
+html[data-theme='dark'] .entry,
+html[data-theme='dark'] .about-card {
+  background: #1e293b;
+  border-color: #334155;
+}
+html[data-theme='dark'] .sidebar {
+  border-right-color: #334155;
+}
+html[data-theme='dark'] .theme-toggle,
+html[data-theme='dark'] .gh-link,
+html[data-theme='dark'] .user-info {
+  color: #94a3b8;
+}
+html[data-theme='dark'] .sidebar button:hover,
+html[data-theme='dark'] .theme-toggle:hover,
+html[data-theme='dark'] .gh-link:hover,
+html[data-theme='dark'] .user-menu:hover {
+  background: #1e293b;
+}
+html[data-theme='dark'] .sidebar-footer {
+  border-top-color: #334155;
+}
+html[data-theme='dark'] .title,
+html[data-theme='dark'] .about-title,
+html[data-theme='dark'] .about-subtitle,
+html[data-theme='dark'] .cl-ver,
+html[data-theme='dark'] .card-header h3,
+html[data-theme='dark'] .modal h2 {
+  color: #e2e8f0;
+}
+html[data-theme='dark'] .meta,
+html[data-theme='dark'] .label,
+html[data-theme='dark'] .about-line,
+html[data-theme='dark'] .cl-items,
+html[data-theme='dark'] .empty,
+html[data-theme='dark'] .confirm-text {
+  color: #94a3b8;
+}
+html[data-theme='dark'] .card-header {
+  background: #0f172a;
+  border-bottom-color: #334155;
+}
+html[data-theme='dark'] .card-divider {
+  background: #334155;
+}
+html[data-theme='dark'] .tag {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+html[data-theme='dark'] .dropdown-menu {
+  background: #1e293b;
+  border-color: #334155;
+}
+html[data-theme='dark'] .cl-tag {
+  background: #1e3a5f;
+  border-color: #334155;
+  color: #93c5fd;
+}
+
+/* ===== 置顶与拖拽排序（网页端，偏好按账号保存在服务端） ===== */
+.entry-pinned {
+  border-left: 3px solid var(--fnos-primary);
+}
+.entry[draggable='true'] {
+  cursor: grab;
+}
+.entry-dragging {
+  opacity: 0.45;
+}
+.entry-drop-target {
+  border-color: var(--fnos-primary);
+  background: #f0f6ff;
+}
+.entry-head .title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.pin-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fnos-primary);
+  flex-shrink: 0;
+}
+.pin-btn.pin-on {
+  color: var(--fnos-primary);
+  border-color: var(--fnos-primary);
+}
+html[data-theme='dark'] .entry-drop-target {
+  background: #1e3a5f;
 }
 </style>

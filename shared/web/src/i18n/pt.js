@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: 'Modelo de importação' },
-  login: { username: 'Usuário', usernameOrEmail: 'Usuário / E-mail', password: 'Senha', submit: 'Entrar', adminTitle: 'Login de administrador', adminOnly: 'Esta conta não tem permissão de administrador', setupTitle: 'Configurar conta de administrador', setupHint: 'Primeiro uso, configure a conta e senha de administrador', setupSubmit: 'Criar administrador e entrar', register: 'Registrar', toRegister: 'Registrar', forgot: 'Esqueceu a senha?', back: 'Voltar ao login', code: 'Código de verificação', sendCode: 'Enviar código', newPassword: 'Nova senha', resetSubmit: 'Redefinir senha', registerClosed: 'O registro está fechado, contate o administrador' },
+  login: { username: 'Usuário', usernameOrEmail: 'Usuário / E-mail', password: 'Senha', submit: 'Entrar', adminTitle: 'Login de administrador', adminOnly: 'Esta conta não tem permissão de administrador', setupTitle: 'Configurar conta de administrador', setupHint: 'Primeiro uso, configure a conta e senha de administrador', setupSubmit: 'Criar administrador e entrar', register: 'Registrar', toRegister: 'Registrar', forgot: 'Esqueceu a senha?', back: 'Voltar ao login', code: 'Código de verificação', sendCode: 'Enviar código', newPassword: 'Nova senha', resetSubmit: 'Redefinir senha', registerClosed: 'O registro está fechado, contate o administrador', unlockTitle: 'Desbloquear o cofre', unlockHint: 'Digite a senha da conta para desbloquear o cofre', unlockSubmit: 'Desbloquear', unlockFailed: 'Falha ao desbloquear, verifique sua senha' },
   role: { admin: 'Administrador', user: 'Usuário', superadmin: 'Superadministrador' },
   header: { logout: 'Sair', lock: 'Bloquear' },
   tabs: { passwords: 'Minhas senhas', trash: 'Lixeira', users: 'Gerenciar usuários', logs: 'Registro de operações', settings: 'Configurações do sistema' },
@@ -67,7 +67,10 @@ export default {
     enabled: 'Ativado',
     disabled: 'Desativado',
     codeSent: 'Código de verificação enviado',
-    resetDone: 'Senha redefinida, faça login'
+    resetDone: 'Senha redefinida, faça login',
+    cryptoUnavailable: 'Criptografia indisponível (HTTPS ou localhost necessário)',
+    decryptFailed: 'Algumas entradas falharam ao descriptografar, verifique a senha mestra',
+    migrated: '{n} entradas antigas migradas'
   },
   trash: {
     empty: 'A lixeira está vazia',

@@ -33,6 +33,8 @@ Write-Host "==> 1/3 build web frontend ..."
 # frontend source is shared/web, output goes to shared/web/dist (go:embed all:dist)
 Push-Location (Join-Path $Root "..\shared\web")
 npm.cmd install | Out-Null
+# 注入前端版本号（与 manifest 一致），用于运行时版本自检与页脚显示
+$env:APP_VERSION = $Version
 npm.cmd run build
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "frontend build failed" }
 Pop-Location
@@ -42,10 +44,12 @@ Push-Location $Root
 $env:CGO_ENABLED = "0"
 $env:GOOS = "linux"
 $env:GOARCH = "amd64"
-go build -o (Join-Path $CnDir "app\cryptbox-server") .
+# 注入版本号：界面与 /api/status 会显示，便于确认「是否装成了新版 / 前端是否已刷新」
+$LdFlags = "-X github.com/qingzhi-awa/cryptbox/shared/version.Version=$Version"
+go build -ldflags $LdFlags -o (Join-Path $CnDir "app\cryptbox-server") .
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "amd64 build failed" }
 $env:GOARCH = "arm64"
-go build -o (Join-Path $CnDir "app\cryptbox-server-arm64") .
+go build -ldflags $LdFlags -o (Join-Path $CnDir "app\cryptbox-server-arm64") .
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "arm64 build failed" }
 Pop-Location
 

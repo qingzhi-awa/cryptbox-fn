@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: '가져오기 템플릿' },
-  login: { username: '사용자명', usernameOrEmail: '사용자명 / 이메일', password: '비밀번호', submit: '로그인', adminTitle: '관리자 로그인', adminOnly: '이 계정에는 관리자 권한이 없습니다', setupTitle: '관리자 계정 설정', setupHint: '처음 사용 중입니다. 관리자 계정과 비밀번호를 설정하세요', setupSubmit: '관리자 생성 및 시작', register: '가입', toRegister: '회원가입', forgot: '비밀번호 찾기', back: '로그인으로 돌아가기', code: '인증 코드', sendCode: '코드 전송', newPassword: '새 비밀번호', resetSubmit: '비밀번호 재설정', registerClosed: '등록이 닫혀 있습니다. 관리자에게 문의하세요' },
+  login: { username: '사용자명', usernameOrEmail: '사용자명 / 이메일', password: '비밀번호', submit: '로그인', adminTitle: '관리자 로그인', adminOnly: '이 계정에는 관리자 권한이 없습니다', setupTitle: '관리자 계정 설정', setupHint: '처음 사용 중입니다. 관리자 계정과 비밀번호를 설정하세요', setupSubmit: '관리자 생성 및 시작', register: '가입', toRegister: '회원가입', forgot: '비밀번호 찾기', back: '로그인으로 돌아가기', code: '인증 코드', sendCode: '코드 전송', newPassword: '새 비밀번호', resetSubmit: '비밀번호 재설정', registerClosed: '등록이 닫혀 있습니다. 관리자에게 문의하세요', unlockTitle: '보관함 잠금 해제', unlockHint: '계정 비밀번호를 입력하여 보관함을 잠금 해제하세요', unlockSubmit: '잠금 해제', unlockFailed: '잠금 해제 실패, 비밀번호를 확인하세요' },
   role: { admin: '관리자', user: '사용자', superadmin: '슈퍼 관리자' },
   header: { logout: '로그아웃', lock: '잠금' },
   tabs: { passwords: '내 비밀번호', trash: '휴지통', users: '사용자 관리', logs: '작업 로그', settings: '시스템 설정' },
@@ -67,7 +67,10 @@ export default {
     enabled: '활성화됨',
     disabled: '비활성화됨',
     codeSent: '인증 코드를 보냈습니다',
-    resetDone: '비밀번호가 재설정되었습니다. 로그인하세요'
+    resetDone: '비밀번호가 재설정되었습니다. 로그인하세요',
+    cryptoUnavailable: '이 환경에서는 암호화를 사용할 수 없습니다 (HTTPS 또는 localhost 필요)',
+    decryptFailed: '일부 항목의 복호화에 실패했습니다. 마스터 비밀번호를 확인하세요',
+    migrated: '이전 데이터 {n}건을 마이그레이션했습니다'
   },
   trash: {
     empty: '휴지통이 비어 있습니다',

@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: "Modèle d'import" },
-  login: { username: "Nom d'utilisateur", usernameOrEmail: "Nom d'utilisateur / E-mail", password: 'Mot de passe', submit: 'Connexion', adminTitle: 'Connexion administrateur', adminOnly: "Ce compte n'a pas les droits d'administration", setupTitle: 'Configurer le compte admin', setupHint: 'Première utilisation, configurez le compte et le mot de passe admin', setupSubmit: "Créer l'admin et entrer", register: "S'inscrire", toRegister: 'Créer un compte', forgot: 'Mot de passe oublié ?', back: 'Retour à la connexion', code: 'Code de vérification', sendCode: 'Envoyer le code', newPassword: 'Nouveau mot de passe', resetSubmit: 'Réinitialiser le mot de passe', registerClosed: "L'inscription est fermée, contactez l'administrateur" },
+  login: { username: "Nom d'utilisateur", usernameOrEmail: "Nom d'utilisateur / E-mail", password: 'Mot de passe', submit: 'Connexion', adminTitle: 'Connexion administrateur', adminOnly: "Ce compte n'a pas les droits d'administration", setupTitle: 'Configurer le compte admin', setupHint: 'Première utilisation, configurez le compte et le mot de passe admin', setupSubmit: "Créer l'admin et entrer", register: "S'inscrire", toRegister: 'Créer un compte', forgot: 'Mot de passe oublié ?', back: 'Retour à la connexion', code: 'Code de vérification', sendCode: 'Envoyer le code', newPassword: 'Nouveau mot de passe', resetSubmit: 'Réinitialiser le mot de passe', registerClosed: "L'inscription est fermée, contactez l'administrateur", unlockTitle: 'Déverrouiller le coffre', unlockHint: 'Saisissez le mot de passe du compte pour déverrouiller le coffre', unlockSubmit: 'Déverrouiller', unlockFailed: 'Échec du déverrouillage, vérifiez votre mot de passe' },
   role: { admin: 'Administrateur', user: 'Utilisateur', superadmin: 'Super administrateur' },
   header: { logout: 'Déconnexion', lock: 'Verrouiller' },
   tabs: { passwords: 'Mes mots de passe', trash: 'Corbeille', users: 'Gestion des utilisateurs', logs: "Journal d'opérations", settings: 'Paramètres système' },
@@ -67,7 +67,10 @@ export default {
     enabled: 'Activé',
     disabled: 'Désactivé',
     codeSent: 'Code de vérification envoyé',
-    resetDone: 'Mot de passe réinitialisé, veuillez vous connecter'
+    resetDone: 'Mot de passe réinitialisé, veuillez vous connecter',
+    cryptoUnavailable: 'Chiffrement indisponible (HTTPS ou localhost requis)',
+    decryptFailed: "Certaines entrées n'ont pas pu être déchiffrées, vérifiez le mot de passe principal",
+    migrated: '{n} anciennes entrées migrées'
   },
   trash: {
     empty: 'La corbeille est vide',

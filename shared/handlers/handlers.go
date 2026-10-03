@@ -2,9 +2,11 @@
 package handlers
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,18 +22,83 @@ import (
 	"github.com/qingzhi-awa/cryptbox/shared/csv"
 	"github.com/qingzhi-awa/cryptbox/shared/db"
 	"github.com/qingzhi-awa/cryptbox/shared/log"
+	"github.com/qingzhi-awa/cryptbox/shared/ratelimit"
+	"github.com/qingzhi-awa/cryptbox/shared/tlsutil"
+	"github.com/qingzhi-awa/cryptbox/shared/uuid"
+	"github.com/qingzhi-awa/cryptbox/shared/version"
+	"github.com/qingzhi-awa/cryptbox/shared/web"
 )
 
-// Server 持有共享运行时状态（配置、数据库、加密密钥）。
+// maxJSONBody 是单个 API 请求体的上限。既覆盖整库上传的合理体积，
+// 又避免超大请求造成内存与磁盘膨胀。
+const maxJSONBody = 16 << 20 // 16MB
+
+// 限流参数（进程内固定窗口，见 shared/ratelimit）。
+const (
+	loginIPPerMinute       = 30
+	loginFailMax           = 5
+	loginFailLockFor       = 15 * time.Minute
+	registerIPPerMinute    = 10
+	resetIPPerMinute       = 20
+	resetEmailPerWindow    = 15
+	resetEmailWindow       = 15 * time.Minute
+	sendCodeIPPerHour      = 20
+	sendCodeEmailPerWindow = 3
+	sendCodeWindow         = 15 * time.Minute
+)
+
+// 会话凭据：Authorization（直连）/ X-Auth-Token（网关会保留自定义头）/ Cookie（网关不干预）。
+// Cookie 有效期与 JWT 一致（见 shared/auth.GenerateToken）。
+const (
+	authCookieName   = "cryptbox_token"
+	authCookieMaxAge = 24 * time.Hour
+)
+
+// Server 持有共享运行时状态（配置、数据库、加密密钥、限流器）。
 type Server struct {
 	Cfg    config.Config
 	DB     *sql.DB
 	EncKey []byte
+
+	loginIP       *ratelimit.Limiter
+	loginLock     *ratelimit.FailLocker
+	registerIP    *ratelimit.Limiter
+	resetIP       *ratelimit.Limiter
+	resetEmail    *ratelimit.Limiter
+	sendCodeIP    *ratelimit.Limiter
+	sendCodeEmail *ratelimit.Limiter
 }
 
 // NewServer 构造一个 Server 实例。
 func NewServer(cfg config.Config, database *sql.DB, encKey []byte) *Server {
-	return &Server{Cfg: cfg, DB: database, EncKey: encKey}
+	s := &Server{
+		Cfg:    cfg,
+		DB:     database,
+		EncKey: encKey,
+
+		loginIP:       ratelimit.New(loginIPPerMinute, time.Minute),
+		loginLock:     ratelimit.NewFailLocker(loginFailMax, loginFailLockFor),
+		registerIP:    ratelimit.New(registerIPPerMinute, time.Minute),
+		resetIP:       ratelimit.New(resetIPPerMinute, time.Minute),
+		resetEmail:    ratelimit.New(resetEmailPerWindow, resetEmailWindow),
+		sendCodeIP:    ratelimit.New(sendCodeIPPerHour, time.Hour),
+		sendCodeEmail: ratelimit.New(sendCodeEmailPerWindow, sendCodeWindow),
+	}
+	// 周期性清理过期计数，避免进程内 map 无限增长。
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.loginIP.Cleanup()
+			s.loginLock.Cleanup()
+			s.registerIP.Cleanup()
+			s.resetIP.Cleanup()
+			s.resetEmail.Cleanup()
+			s.sendCodeIP.Cleanup()
+			s.sendCodeEmail.Cleanup()
+		}
+	}()
+	return s
 }
 
 // RegisterRoutes 在 gin.Engine 上注册全部 API 路由与 CORS 中间件。
@@ -41,21 +108,32 @@ func RegisterRoutes(r *gin.Engine, cfg config.Config, database *sql.DB, encKey [
 }
 
 func (s *Server) register(r *gin.Engine) {
+	r.Use(securityHeadersMiddleware(s.Cfg))
 	r.Use(s.corsMiddleware())
+	r.Use(bodyLimitMiddleware())
+	// API 访问日志：把每个请求（方法/路径/状态/耗时）写入 info.log，便于网关场景排查。
+	r.Use(accessLogMiddleware())
 
 	api := r.Group("/api")
 	{
 		// 公开
 		api.GET("/health", s.handleHealth)
+		// 证书下载：自签证书本身是公开信息（每次 TLS 握手都会下发），
+		// 提供下载便于用户导入系统信任库，消除浏览器警告并让 iframe 内嵌可用。
+		api.GET("/cert", s.handleCert)
+		// 证书指纹：客户端首次连接自签服务器时用于「信任首次使用」（TOFU）核对。
+		api.GET("/fingerprint", s.handleFingerprint)
 		api.GET("/status", s.handleStatus)
 		api.POST("/setup", s.handleSetup)
 		api.GET("/avatar/:id", s.handleGetAvatar)
-		api.POST("/register", s.handleRegister)
-		api.POST("/register/send-code", s.handleSendRegisterCode)
+		api.POST("/register", s.ipLimit(s.registerIP, "注册请求过于频繁，请稍后再试"), s.handleRegister)
+		api.POST("/register/send-code", s.ipLimit(s.sendCodeIP, "验证码发送过于频繁，请稍后再试"), s.handleSendRegisterCode)
 		api.GET("/settings/public", s.handlePublicSettings)
-		api.POST("/login", s.handleLogin)
-		api.POST("/reset/send-code", s.handleSendResetCode)
-		api.POST("/reset", s.handleResetPassword)
+		api.POST("/login", s.ipLimit(s.loginIP, "登录请求过于频繁，请稍后再试"), s.handleLogin)
+		// 退出登录：清除服务端下发的 HttpOnly 会话 Cookie（前端无法自行清除）。
+		api.POST("/logout", s.handleLogout)
+		api.POST("/reset/send-code", s.ipLimit(s.sendCodeIP, "验证码发送过于频繁，请稍后再试"), s.handleSendResetCode)
+		api.POST("/reset", s.ipLimit(s.resetIP, "请求过于频繁，请稍后再试"), s.handleResetPassword)
 
 		// 登录用户
 		authed := api.Group("", s.authMiddleware())
@@ -63,18 +141,29 @@ func (s *Server) register(r *gin.Engine) {
 			authed.GET("/me", s.handleMe)
 			authed.PUT("/me", s.handleUpdateMe)
 			authed.POST("/me/avatar", s.handleUploadAvatar)
-			authed.GET("/entries", s.handleListEntries)
-			authed.POST("/entries", s.handleCreateEntry)
-			authed.POST("/entries/import", s.handleImportEntries)
-			authed.POST("/entries/import-text", s.handleImportText)
-			authed.PUT("/entries/:id", s.handleUpdateEntry)
-			authed.DELETE("/entries/:id", s.handleDeleteEntry)
-			authed.GET("/entries/trash", s.handleListTrash)
-			authed.POST("/entries/trash/empty", s.handleEmptyTrash)
-			authed.POST("/entries/:id/restore", s.handleRestoreEntry)
-			authed.DELETE("/entries/:id/purge", s.handlePurgeEntry)
+			// 密码条目统一走端到端加密的 Vault 协议（整库上传/下载），不存在明文接口。
 			authed.GET("/vault", s.handleGetVault)
 			authed.PUT("/vault", s.handlePutVault)
+			authed.PUT("/vault-key", s.handlePutVaultKey)
+			// 旧数据迁移专用：返回历史上由服务端静态密钥加密的明文，迁移完成后不再返回数据。
+			authed.GET("/vault/legacy", s.handleGetLegacy)
+			// 密码重置后放弃旧密码库：清空本账号全部条目密文并重置 vault key（见 handleDeleteVault）。
+			authed.DELETE("/vault", s.handleDeleteVault)
+			// 置顶同步开关（账号级）：开启后置顶作为密码库数据参与多端同步；
+			// 关闭时桌面端置顶按设备保存、网页端按账号保存。飞牛网关只转发 GET/POST，
+			// 写入口同时提供 POST。
+			authed.GET("/vault/pin-sync", s.handleGetVaultPinSync)
+			authed.PUT("/vault/pin-sync", s.handlePutVaultPinSync)
+			authed.POST("/vault/pin-sync", s.handlePutVaultPinSync)
+
+			// —— 网关兼容入口（POST 等价路径）——
+			// 飞牛统一网关只转发 GET/POST：PUT/DELETE 会被网关自身接管并返回其首页（HTTP 200 非 JSON），
+			// 前端表现为「接口返回了非预期内容」。因此所有写操作额外提供 POST 入口；
+			// 直连端口时原有 PUT/DELETE 仍然可用（桌面客户端沿用）。
+			authed.POST("/vault", s.handlePutVault)
+			authed.POST("/vault/delete", s.handleDeleteVault)
+			authed.POST("/vault-key", s.handlePutVaultKey)
+			authed.POST("/me/update", s.handleUpdateMe)
 
 			// 管理员
 			admin := authed.Group("", s.adminMiddleware())
@@ -91,6 +180,12 @@ func (s *Server) register(r *gin.Engine) {
 				admin.POST("/settings/test-email", s.handleTestEmail)
 				admin.GET("/settings/export", s.handleExportSettings)
 				admin.POST("/settings/import", s.handleImportSettings)
+
+				// 网关兼容入口：用户管理写操作（以查询参数传 id，避免与 /users/import 路由冲突）。
+				admin.POST("/settings/update", s.handleUpdateSettings)
+				admin.POST("/users/update", withQueryID(s.handleUpdateUser))
+				admin.POST("/users/delete", withQueryID(s.handleDeleteUser))
+				admin.POST("/users/status", withQueryID(s.handleUpdateUserStatus))
 			}
 		}
 	}
@@ -98,11 +193,62 @@ func (s *Server) register(r *gin.Engine) {
 
 // ---- 中间件 ----
 
-func (s *Server) corsMiddleware() gin.HandlerFunc {
+// securityHeadersMiddleware 下发基础安全响应头。
+// 仅在**真正的 TLS 连接**上下发 HSTS（而非"配置了证书"就下发）：飞牛统一网关
+// 经 unix socket 以明文 HTTP 转发应用响应，此时若把 HSTS 透传给浏览器，会以
+// NAS 主机名记录长达一年的强制 HTTPS，波及该主机上的其他服务与子域。
+// 注意：不下发 X-Frame-Options——本应用需要被 fnOS 桌面以 iframe 形式内嵌
+// （应用入口与 fnOS 桌面不同源），DENY/SAMEORIGIN 都会阻止该集成。
+func securityHeadersMiddleware(cfg config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "no-referrer")
+		if c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000")
+		}
+		c.Next()
+	}
+}
+
+// bodyLimitMiddleware 限制请求体大小，防止超大请求耗尽内存与磁盘。
+func bodyLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBody)
+		}
+		c.Next()
+	}
+}
+
+// accessLogMiddleware 把每个 API 请求（方法/路径/状态/耗时）记入标准日志。
+// 起因：飞牛网关场景排查「请求是否真的到达密匣服务」全靠猜测；fpk 部署下
+// stdout 会写入数据目录 info.log，打开日志即可直接看到每个请求。
+func accessLogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		log.Info("API %s %s -> %d (%s)",
+			c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(start).Round(time.Millisecond))
+	}
+}
+
+// corsMiddleware 仅对显式配置在白名单中的来源下发跨域响应头。
+// CORS_ORIGINS 为空时不下发任何跨域头，浏览器只允许同源访问（推荐默认）。
+func (s *Server) corsMiddleware() gin.HandlerFunc {
+	allowed := make(map[string]bool, len(s.Cfg.CORSOrigins))
+	for _, origin := range s.Cfg.CORSOrigins {
+		allowed[origin] = true
+	}
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin != "" && allowed[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
+			c.Header("Access-Control-Allow-Credentials", "true")
+			c.Header("Access-Control-Max-Age", "600")
+			c.Header("Vary", "Origin")
+		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -111,14 +257,87 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 	}
 }
 
+// ipLimit 按客户端 IP 做限流。
+func (s *Server) ipLimit(l *ratelimit.Limiter, msg string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !l.Allow(clientIP(c)) {
+			c.Header("Retry-After", strconv.Itoa(int(l.RetryAfter(clientIP(c)).Seconds())+1))
+			writeJSON(c, http.StatusTooManyRequests, gin.H{"error": msg})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// authTokenFromRequest 按优先级从请求中提取 JWT。
+// 顺序很重要：直连端口时走 Authorization；经飞牛统一网关时该头会被网关剥离，
+// 因此依次回退到自定义头 X-Auth-Token 与 HttpOnly Cookie（网关不干预 Cookie）。
+func authTokenFromRequest(c *gin.Context) string {
+	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer ")
+	}
+	if h := strings.TrimSpace(c.GetHeader("X-Auth-Token")); h != "" {
+		return h
+	}
+	if ck, err := c.Cookie(authCookieName); err == nil && ck != "" {
+		return ck
+	}
+	return ""
+}
+
+// sessionCookiePath 依据请求路径推导 Cookie 作用域：
+// 经网关访问时原始路径形如 /app/cryptbox/api/login → Path=/app/cryptbox
+// （令牌不外泄给同一主机上的其他服务）；直连端口时为 /api/login → Path=/。
+func sessionCookiePath(c *gin.Context) string {
+	p := web.OriginalPath(c.Request)
+	if p == "" {
+		p = c.Request.URL.Path
+	}
+	if i := strings.Index(p, "/api/"); i > 0 {
+		return p[:i]
+	}
+	return "/"
+}
+
+// setSessionCookie 在登录成功后下发 HttpOnly 会话 Cookie。
+// 网关会剥离 Authorization 头，Cookie 是内嵌场景下唯一可靠的凭据通道。
+func setSessionCookie(c *gin.Context, token string) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     authCookieName,
+		Value:    token,
+		Path:     sessionCookiePath(c),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   c.Request.TLS != nil,
+		MaxAge:   int(authCookieMaxAge.Seconds()),
+	})
+}
+
+func clearSessionCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     authCookieName,
+		Value:    "",
+		Path:     sessionCookiePath(c),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 仅支持登录页主动登录（Bearer token）。不使用飞牛网关 X-Trim 头做强制验证，
-		// 用户身份完全由自定义的账号密码（JWT）决定。
-		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
-			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, strings.TrimPrefix(h, "Bearer ")); err == nil {
+		// 仅认自定义账号密码签发的 JWT（不使用飞牛网关 X-Trim 头做强制验证），
+		// 凭据可来自 Authorization 头、X-Auth-Token 头或会话 Cookie。
+		if tok := authTokenFromRequest(c); tok != "" {
+			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, tok); err == nil {
+				// 每请求回查角色、状态与令牌版本：
+				//   · status != active → 停用即时生效；
+				//   · token_version 不匹配 → 改密码后旧令牌立即失效（PT-06）。
 				var role, status string
-				if err := s.DB.QueryRow(`SELECT role, status FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status); err == nil && status == "active" {
+				var tokenVer int64
+				if err := s.DB.QueryRow(`SELECT role, status, COALESCE(token_version, 0) FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status, &tokenVer); err == nil &&
+					status == "active" && tokenVer == claims.TokenVer {
 					claims.Role = role
 					c.Set("claims", claims)
 					c.Next()
@@ -149,6 +368,20 @@ func currentClaims(c *gin.Context) *auth.Claims {
 	return v.(*auth.Claims)
 }
 
+// withQueryID 让「以查询参数传 id」的 POST 兼容入口复用原有按路径参数解析的处理器：
+// 若路径中没有 :id 而查询串带 id，则注入到 c.Params。
+// 采用查询参数而非 /users/:id/... 是为了避免与既有 /users/import 静态路由冲突。
+func withQueryID(h gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Param("id") == "" {
+			if id := strings.TrimSpace(c.Query("id")); id != "" {
+				c.Params = append(c.Params, gin.Param{Key: "id", Value: id})
+			}
+		}
+		h(c)
+	}
+}
+
 // writeJSON / readJSON 保持与旧版一致的响应行为。
 func writeJSON(c *gin.Context, status int, v interface{}) {
 	c.JSON(status, v)
@@ -166,35 +399,78 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 // handleStatus 返回是否已初始化（是否已有用户）。
 func (s *Server) handleStatus(c *gin.Context) {
-	writeJSON(c, http.StatusOK, gin.H{"initialized": db.IsInitialized(s.DB)})
+	resp := gin.H{
+		"initialized": db.IsInitialized(s.DB),
+		// build 为版本号的短摘要：前端据此判断"页面是否比服务端旧"以自动刷新，
+		// 未认证请求不暴露精确版本号（降低版本指纹信息暴露）。
+		"build": version.BuildTag(),
+	}
+	// 已持有效令牌时附带精确版本号（界面页脚/关于页展示用）。
+	if claims, err := auth.ParseToken(s.Cfg.JWTSecret, authTokenFromRequest(c)); err == nil && claims.UserID > 0 {
+		resp["version"] = version.Version
+	}
+	writeJSON(c, http.StatusOK, resp)
+}
+
+// handleCert 下载当前启用的 TLS 证书（PEM）。
+// 用途：用户将自签证书导入系统「受信任的根证书颁发机构」后，
+// 浏览器不再弹证书警告，iframe 内嵌打开也不再被拦截。
+// 证书本身是公开信息（TLS 握手时即下发），因此无需鉴权。
+func (s *Server) handleCert(c *gin.Context) {
+	if !s.Cfg.TLSEnabled() {
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "当前服务未启用 HTTPS，无证书可下载"})
+		return
+	}
+	data, err := os.ReadFile(s.Cfg.TLSCert)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "读取证书失败"})
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="cryptbox.crt"`)
+	c.Data(http.StatusOK, "application/x-x509-ca-cert", data)
+}
+
+// handleFingerprint 返回当前启用证书的 SHA-256 指纹（整证书 DER + SPKI 两种）。
+// 用途：客户端连接自签服务器时，本地从 TLS 握手取到对端证书并计算指纹，
+// 再把本接口返回的指纹作为「用户核对提示」的辅助信息（若两者不一致，说明
+// 中间存在代理或伪造节点）。证书是公开信息（TLS 握手时即下发），无需鉴权。
+func (s *Server) handleFingerprint(c *gin.Context) {
+	if !s.Cfg.TLSEnabled() {
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "当前服务未启用 HTTPS，无证书指纹"})
+		return
+	}
+	certFP, spkiFP, err := tlsutil.Fingerprints(s.Cfg.TLSCert)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "读取证书失败"})
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{
+		"algorithm":   "SHA-256",
+		"fingerprint": certFP,
+		"spki":        spkiFP,
+	})
 }
 
 // handleSetup 首次设置超级管理员账号（系统无用户时）。
 func (s *Server) handleSetup(c *gin.Context) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		VaultKeyEnc string `json:"vault_key_enc"`
+		KdfSalt     string `json:"kdf_salt"`
 	}
 	if err := readJSON(c, &req); err != nil {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
-	if req.Username == "" || len(req.Password) < 6 {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空，密码至少 6 位"})
+	if req.Username == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空"})
 		return
 	}
-	if db.IsInitialized(s.DB) {
-		writeJSON(c, http.StatusConflict, gin.H{"error": "系统已初始化"})
-		return
-	}
-	var exists int
-	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE username = ?`, req.Username).Scan(&exists); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	if exists > 0 {
-		writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
+	// 超级管理员是最高权限账号，套用更严的口令要求（长度 + 复杂度）。
+	if err := auth.ValidateSuperAdminPassword(s.DB, req.Password); err != nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)
@@ -202,22 +478,37 @@ func (s *Server) handleSetup(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	id, err := db.SetupAdmin(s.DB, req.Username, hash, "")
+	// 原子初始化：仅当系统中尚无任何用户时才创建，避免并发请求重复初始化。
+	id, created, err := db.SetupAdminIfEmpty(s.DB, req.Username, hash, "", strings.TrimSpace(req.KdfSalt))
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "superadmin")
+	if !created {
+		writeJSON(c, http.StatusConflict, gin.H{"error": "系统已初始化"})
+		return
+	}
+	// 端到端加密：记录浏览器端用 master key 加密后的 vault key 密文。
+	if req.VaultKeyEnc != "" {
+		if _, err := s.DB.Exec(`UPDATE users SET vault_key_enc = ? WHERE id = ?`, req.VaultKeyEnc, id); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+	}
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "superadmin", db.TokenVersion(s.DB, id))
+	setSessionCookie(c, token)
 	log.LogAction(s.DB, id, req.Username, "setup", "初始化超级管理员", clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": req.Username, "role": "superadmin", "avatar": avatarName(id)})
 }
 
 func (s *Server) handleRegister(c *gin.Context) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Email    string `json:"email"`
-		Code     string `json:"code"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		Email       string `json:"email"`
+		Code        string `json:"code"`
+		VaultKeyEnc string `json:"vault_key_enc"`
+		KdfSalt     string `json:"kdf_salt"`
 	}
 	if err := readJSON(c, &req); err != nil {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -268,12 +559,13 @@ func (s *Server) handleRegister(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	_, err = s.DB.Exec(`INSERT INTO users (id, username, password_hash, role, status, email) VALUES (?, ?, ?, 'user', 'active', ?)`, id, req.Username, hash, req.Email)
+	_, err = s.DB.Exec(`INSERT INTO users (id, username, password_hash, role, status, email, vault_key_enc, kdf_salt) VALUES (?, ?, ?, 'user', 'active', ?, ?, ?)`, id, req.Username, hash, req.Email, req.VaultKeyEnc, strings.TrimSpace(req.KdfSalt))
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "user")
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, req.Username, "user", db.TokenVersion(s.DB, id))
+	setSessionCookie(c, token)
 	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": req.Username, "role": "user", "avatar": avatarName(id)})
 }
 
@@ -287,15 +579,24 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 	login := strings.TrimSpace(req.Username)
+	lockKey := strings.ToLower(login)
+	// 账号维度失败锁定：抵御针对单一账号的口令暴力破解。
+	if s.loginLock.Locked(lockKey) {
+		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "登录失败次数过多，请 15 分钟后再试"})
+		return
+	}
 	var (
-		id     int64
-		uname  string
-		hash   string
-		role   string
-		status string
+		id          int64
+		uname       string
+		hash        string
+		role        string
+		status      string
+		vaultKeyEnc string
+		kdfSalt     string
 	)
-	err := s.DB.QueryRow(`SELECT id, username, password_hash, role, status FROM users WHERE username = ? OR email = ?`, login, login).Scan(&id, &uname, &hash, &role, &status)
+	err := s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE username = ? OR email = ?`, login, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
 	if err == sql.ErrNoRows || (err == nil && !auth.CheckPassword(hash, req.Password)) {
+		s.loginLock.Fail(lockKey)
 		log.LogAction(s.DB, 0, login, "login_failed", "登录失败", clientIP(c))
 		writeJSON(c, http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
 		return
@@ -308,201 +609,77 @@ func (s *Server) handleLogin(c *gin.Context) {
 		writeJSON(c, http.StatusForbidden, gin.H{"error": "账号已被停用"})
 		return
 	}
+	s.loginLock.Reset(lockKey)
 	log.LogAction(s.DB, id, uname, "login", "用户登录", clientIP(c))
-	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, uname, role)
-	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": uname, "role": role, "avatar": avatarName(id)})
+	token, _ := auth.GenerateToken(s.Cfg.JWTSecret, id, uname, role, db.TokenVersion(s.DB, id))
+	setSessionCookie(c, token)
+	writeJSON(c, http.StatusOK, gin.H{"token": token, "username": uname, "role": role, "avatar": avatarName(id), "vault_key_enc": vaultKeyEnc, "kdf_salt": kdfSalt})
+}
+
+// handleLogout 退出登录：清除会话 Cookie（HttpOnly，只能由服务端清除）。
+func (s *Server) handleLogout(c *gin.Context) {
+	clearSessionCookie(c)
+	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleDeleteVault 清空当前用户的密码库并重置 vault key。
+//
+// 场景：用户通过「忘记密码」重置密码后，服务端保存的 vault_key_enc 仍由旧密码
+// 派生的 master key 包裹，新密码无法解开。用户可选择：
+//  1. 在解锁界面输入旧密码恢复（客户端用旧 master key 解开旧 vault key 后用新密码重新包裹，数据无损）；
+//  2. 调用本接口放弃旧数据：清空条目密文并置空 vault_key_enc，下次解锁时自动生成新 vault key。
+//
+// 仅影响当前登录用户自己的数据。
+func (s *Server) handleDeleteVault(c *gin.Context) {
+	claims := currentClaims(c)
+	if _, err := s.DB.Exec(`DELETE FROM entries WHERE user_id = ?`, claims.UserID); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if _, err := s.DB.Exec(`UPDATE users SET vault_key_enc = '' WHERE id = ?`, claims.UserID); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	log.LogAction(s.DB, claims.UserID, claims.Username, "reset_vault", "清空密码库并重置 vault key", clientIP(c))
+	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handlePutVaultKey 上传端到端加密的 vault key（用 master key 加密后的密文）。
+func (s *Server) handlePutVaultKey(c *gin.Context) {
+	claims := currentClaims(c)
+	var req struct {
+		VaultKeyEnc string `json:"vault_key_enc"`
+	}
+	if err := readJSON(c, &req); err != nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if req.VaultKeyEnc == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "vault_key_enc 不能为空"})
+		return
+	}
+	if _, err := s.DB.Exec(`UPDATE users SET vault_key_enc = ? WHERE id = ?`, req.VaultKeyEnc, claims.UserID); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleMe(c *gin.Context) {
 	claims := currentClaims(c)
-	var username, email string
-	_ = s.DB.QueryRow(`SELECT username, email FROM users WHERE id = ?`, claims.UserID).Scan(&username, &email)
+	var username, email, vaultKeyEnc, kdfSalt string
+	_ = s.DB.QueryRow(`SELECT username, email, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE id = ?`, claims.UserID).Scan(&username, &email, &vaultKeyEnc, &kdfSalt)
 	writeJSON(c, http.StatusOK, gin.H{
-		"id":       claims.UserID,
-		"username": username,
-		"email":    email,
-		"avatar":   avatarName(claims.UserID),
-		"role":     claims.Role,
+		"id":            claims.UserID,
+		"username":      username,
+		"email":         email,
+		"avatar":        avatarName(claims.UserID),
+		"role":          claims.Role,
+		"vault_key_enc": vaultKeyEnc,
+		"kdf_salt":      kdfSalt,
+		// 已认证请求返回精确版本号，供界面页脚/关于页展示。
+		"version": version.Version,
 	})
-}
-
-// ---- 密码条目 CRUD（仅本人） ----
-
-func (s *Server) handleListEntries(c *gin.Context) {
-	claims := currentClaims(c)
-	list, err := s.listEntries(claims.UserID)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	writeJSON(c, http.StatusOK, gin.H{"entries": list})
-}
-
-func (s *Server) handleCreateEntry(c *gin.Context) {
-	claims := currentClaims(c)
-	var e db.Entry
-	if err := readJSON(c, &e); err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	saved, err := s.saveEntry(claims.UserID, e)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "add_entry", "添加密码 "+saved.Title, clientIP(c))
-	writeJSON(c, http.StatusOK, saved)
-}
-
-func (s *Server) handleUpdateEntry(c *gin.Context) {
-	claims := currentClaims(c)
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid id"})
-		return
-	}
-	var e db.Entry
-	if err := readJSON(c, &e); err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	e.ID = id
-	saved, err := s.saveEntry(claims.UserID, e)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "update_entry", "修改密码 "+saved.Title, clientIP(c))
-	writeJSON(c, http.StatusOK, saved)
-}
-
-func (s *Server) handleDeleteEntry(c *gin.Context) {
-	claims := currentClaims(c)
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid id"})
-		return
-	}
-	var title string
-	var sortOrder int64
-	_ = s.DB.QueryRow(`SELECT title, sort_order FROM entries WHERE id = ? AND user_id = ?`, id, claims.UserID).Scan(&title, &sortOrder)
-	if db.GetMeta(s.DB, "recycle") == "false" {
-		// 不走回收站：物理删除
-		_, err = s.DB.Exec(`DELETE FROM entries WHERE id = ? AND user_id = ?`, id, claims.UserID)
-		if err != nil {
-			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-			return
-		}
-		s.renumberAfterDelete(claims.UserID, sortOrder)
-	} else {
-		// 走回收站：软删除，打墓碑标记并保留密文以便恢复。
-		now := time.Now().Format(time.RFC3339)
-		_, err = s.DB.Exec(`UPDATE entries SET deleted = 1, sort_order = 0, updated_at = ? WHERE id = ? AND user_id = ?`, now, id, claims.UserID)
-		if err != nil {
-			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-			return
-		}
-		s.renumberAfterDelete(claims.UserID, sortOrder)
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "delete_entry", "删除密码 "+title, clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
-}
-
-// renumberAfterDelete 删除后重排：把序号大于被删序号、且未删除的条目前移一位，保持序号连续。
-func (s *Server) renumberAfterDelete(userID int64, sortOrder int64) {
-	if sortOrder <= 0 {
-		return
-	}
-	_, _ = s.DB.Exec(`UPDATE entries SET sort_order = sort_order - 1 WHERE user_id = ? AND sort_order > ? AND deleted = 0`, userID, sortOrder)
-}
-
-// handleListTrash 返回当前用户回收站中的墓碑条目（含已解密内容），读取前先清理过期条目。
-func (s *Server) handleListTrash(c *gin.Context) {
-	claims := currentClaims(c)
-	s.purgeExpiredTrash(claims.UserID)
-	list, err := s.listTrash(claims.UserID)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	writeJSON(c, http.StatusOK, gin.H{"entries": list})
-}
-
-// handleRestoreEntry 恢复回收站中的条目。
-func (s *Server) handleRestoreEntry(c *gin.Context) {
-	claims := currentClaims(c)
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid id"})
-		return
-	}
-	var maxSort int64
-	_ = s.DB.QueryRow(`SELECT COALESCE(MAX(sort_order), 0) FROM entries WHERE user_id = ? AND deleted = 0`, claims.UserID).Scan(&maxSort)
-	now := time.Now().Format(time.RFC3339)
-	_, err = s.DB.Exec(`UPDATE entries SET deleted = 0, sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?`, maxSort+1, now, id, claims.UserID)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "restore_entry", "恢复密码 id="+strconv.FormatInt(id, 10), clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
-}
-
-// handlePurgeEntry 从回收站永久删除单条条目。
-func (s *Server) handlePurgeEntry(c *gin.Context) {
-	claims := currentClaims(c)
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid id"})
-		return
-	}
-	_, err = s.DB.Exec(`DELETE FROM entries WHERE id = ? AND user_id = ? AND deleted = 1`, id, claims.UserID)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "purge_entry", "永久删除密码 id="+strconv.FormatInt(id, 10), clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
-}
-
-// handleEmptyTrash 清空当前用户回收站。
-func (s *Server) handleEmptyTrash(c *gin.Context) {
-	claims := currentClaims(c)
-	res, err := s.DB.Exec(`DELETE FROM entries WHERE user_id = ? AND deleted = 1`, claims.UserID)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	n, _ := res.RowsAffected()
-	log.LogAction(s.DB, claims.UserID, claims.Username, "empty_trash", "清空回收站", clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"count": n})
-}
-
-// listTrash 返回该用户回收站中的墓碑条目（解密后的领域模型）。
-func (s *Server) listTrash(userID int64) ([]db.Entry, error) {
-	rows, err := s.DB.Query(`SELECT id, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted FROM entries WHERE user_id = ? AND deleted = 1 ORDER BY updated_at DESC`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	list := []db.Entry{}
-	for rows.Next() {
-		var e db.Entry
-		var pwEnc, notesEnc string
-		var deleted int
-		if err := rows.Scan(&e.ID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted); err != nil {
-			return nil, err
-		}
-		if e.Password, err = crypto.AESDecryptString(s.EncKey, pwEnc); err != nil {
-			return nil, err
-		}
-		if e.Notes, err = crypto.AESDecryptString(s.EncKey, notesEnc); err != nil {
-			return nil, err
-		}
-		e.Deleted = deleted != 0
-		list = append(list, e)
-	}
-	return list, rows.Err()
 }
 
 // recycleDays 返回回收站保留天数（默认 30）。
@@ -529,70 +706,25 @@ func (s *Server) purgeExpiredTrash(userID int64) {
 	_, _ = s.DB.Exec(`DELETE FROM entries WHERE user_id = ? AND deleted = 1 AND updated_at < ?`, userID, threshold)
 }
 
-// handleImportEntries 批量导入 CSV 密码，返回导入条数。
-func (s *Server) handleImportEntries(c *gin.Context) {
-	claims := currentClaims(c)
-	var req struct {
-		CSV string `json:"csv"`
-	}
-	if err := readJSON(c, &req); err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	entries, err := csv.ParseCSVEntries([]byte(req.CSV))
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	count := 0
-	for _, e := range entries {
-		if _, err := s.saveEntry(claims.UserID, e); err != nil {
-			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-			return
-		}
-		count++
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "import_entries", "导入密码 "+strconv.Itoa(count)+" 条", clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"count": count})
-}
-
-// handleImportText 从 TXT 批量导入密码。
-func (s *Server) handleImportText(c *gin.Context) {
-	claims := currentClaims(c)
-	var req struct {
-		Text string `json:"text"`
-	}
-	if err := readJSON(c, &req); err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	entries, err := csv.ParseTXTEntries([]byte(req.Text))
-	if err != nil {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	count := 0
-	for _, e := range entries {
-		if _, err := s.saveEntry(claims.UserID, e); err != nil {
-			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-			return
-		}
-		count++
-	}
-	log.LogAction(s.DB, claims.UserID, claims.Username, "import_entries", "导入密码 "+strconv.Itoa(count)+" 条", clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"count": count})
-}
-
 // ---- 桌面客户端同步（整体上传/下载） ----
 
 func (s *Server) handleGetVault(c *gin.Context) {
 	claims := currentClaims(c)
+	// 下载前清理回收站中超过保留天数的墓碑条目。
+	s.purgeExpiredTrash(claims.UserID)
 	list, err := s.listEntriesAll(claims.UserID)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	writeJSON(c, http.StatusOK, gin.H{"entries": list})
+	// pin_sync 告知客户端当前账号的「置顶参与同步」开关：
+	// 开启时客户端应采纳服务端置顶状态，关闭时应保留本机置顶（见各端同步实现）。
+	pinSync, err := s.userPinSync(claims.UserID)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"entries": list, "pin_sync": pinSync})
 }
 
 func (s *Server) handlePutVault(c *gin.Context) {
@@ -605,11 +737,105 @@ func (s *Server) handlePutVault(c *gin.Context) {
 		return
 	}
 	if err := s.replaceEntries(claims.UserID, req.Entries); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		log.LogAction(s.DB, claims.UserID, claims.Username, "upload_vault_failed", "上传密码库失败: "+err.Error(), clientIP(c))
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "保存失败，请重试"})
 		return
 	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "upload_vault", "上传密码库 "+strconv.Itoa(len(req.Entries))+" 条", clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
+// userPinSync 读取账号级「置顶参与同步」开关（默认关闭）。
+func (s *Server) userPinSync(userID int64) (bool, error) {
+	var v int
+	if err := s.DB.QueryRow(`SELECT pin_sync FROM users WHERE id = ?`, userID).Scan(&v); err != nil {
+		return false, err
+	}
+	return v == 1, nil
+}
+
+// setUserPinSync 写入账号级「置顶参与同步」开关。
+func (s *Server) setUserPinSync(userID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := s.DB.Exec(`UPDATE users SET pin_sync = ? WHERE id = ?`, v, userID)
+	return err
+}
+
+// handleGetVaultPinSync 返回当前账号的「置顶参与同步」开关状态。
+func (s *Server) handleGetVaultPinSync(c *gin.Context) {
+	claims := currentClaims(c)
+	enabled, err := s.userPinSync(claims.UserID)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"pin_sync": enabled})
+}
+
+// handlePutVaultPinSync 修改当前账号的「置顶参与同步」开关。
+// 开启后：置顶作为密码库数据参与多端同步（最后上传者生效）；
+// 关闭时：桌面端置顶按设备各自保存，网页端置顶按账号保存，互不影响。
+func (s *Server) handlePutVaultPinSync(c *gin.Context) {
+	claims := currentClaims(c)
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := readJSON(c, &req); err != nil || req.Enabled == nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if err := s.setUserPinSync(claims.UserID, *req.Enabled); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	log.LogAction(s.DB, claims.UserID, claims.Username, "update_pin_sync", "置顶同步开关: "+strconv.FormatBool(*req.Enabled), clientIP(c))
+	writeJSON(c, http.StatusOK, gin.H{"pin_sync": *req.Enabled})
+}
+
+// handleGetLegacy 返回历史上由服务端静态密钥加密的条目明文，仅用于一次性迁移到端到端加密。
+// 迁移完成后条目已改为 vault key 加密，解密失败即被跳过，该接口最终返回空列表。
+func (s *Server) handleGetLegacy(c *gin.Context) {
+	claims := currentClaims(c)
+	list := []db.Entry{}
+	if len(s.EncKey) == 0 {
+		writeJSON(c, http.StatusOK, gin.H{"entries": list})
+		return
+	}
+	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned FROM entries WHERE user_id = ? ORDER BY sort_order ASC, id ASC`, claims.UserID)
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e db.Entry
+		var pwEnc, notesEnc string
+		var deleted int
+		var pinned bool
+		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		e.Pinned = &pinned
+		pw, err := crypto.AESDecryptString(s.EncKey, pwEnc)
+		if err != nil {
+			continue // 已是端到端密文，跳过
+		}
+		notes := ""
+		if notesEnc != "" {
+			if v, err := crypto.AESDecryptString(s.EncKey, notesEnc); err == nil {
+				notes = v
+			}
+		}
+		e.Password = pw
+		e.Notes = notes
+		e.Deleted = deleted != 0
+		list = append(list, e)
+	}
+	writeJSON(c, http.StatusOK, gin.H{"entries": list})
 }
 
 // ---- 用户管理（仅管理员） ----
@@ -897,7 +1123,11 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 			return
 		}
 	}
-	email := req.Email
+	// 邮箱留空时保留原值，避免管理员误提交清空用户邮箱（导致其无法找回密码）。
+	email := strings.TrimSpace(req.Email)
+	if email == "" {
+		email = target.Email
+	}
 	if req.Password != "" {
 		if len(req.Password) < 6 {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": "密码至少 6 位"})
@@ -912,6 +1142,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
+		// 管理员改密后，该用户此前签发的所有令牌立即失效（PT-06）。
+		_ = db.BumpTokenVersion(s.DB, id)
 	} else {
 		if _, err := s.DB.Exec(`UPDATE users SET username=?, email=?, role=?, status=? WHERE id=?`, username, email, role, status, id); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -930,6 +1162,8 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 		Email           string `json:"email"`
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
+		KdfSalt         string `json:"kdf_salt"`
+		VaultKeyEnc     string `json:"vault_key_enc"`
 	}
 	if err := readJSON(c, &req); err != nil {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -951,8 +1185,15 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 		}
 	}
 	if req.NewPassword != "" {
-		if len(req.NewPassword) < 6 {
-			writeJSON(c, http.StatusBadRequest, gin.H{"error": "新密码至少 6 位"})
+		// 超级管理员账号沿用更严的口令要求（长度 + 复杂度）。
+		var validator func(string) error
+		if claims.Role == "superadmin" {
+			validator = func(p string) error { return auth.ValidateSuperAdminPassword(s.DB, p) }
+		} else {
+			validator = func(p string) error { return auth.ValidatePassword(s.DB, p) }
+		}
+		if err := validator(req.NewPassword); err != nil {
+			writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		var hash string
@@ -964,58 +1205,85 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": "当前密码错误"})
 			return
 		}
+	}
+
+	// 一致性保护：密码或派生盐变更会改变主密钥，若账号已存在 vault_key_enc，
+	// 必须同时提交用新主密钥重新加密的 vault_key_enc —— 否则旧密文将永久无法解密。
+	// 客户端未解锁密码库时应拒绝改密（无法重新包裹密钥）。
+	newSalt := strings.TrimSpace(req.KdfSalt)
+	newVaultKey := strings.TrimSpace(req.VaultKeyEnc)
+	var currentVaultKey string
+	if err := s.DB.QueryRow(`SELECT COALESCE(vault_key_enc, '') FROM users WHERE id = ?`, claims.UserID).Scan(&currentVaultKey); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if strings.TrimSpace(currentVaultKey) != "" && (req.NewPassword != "" || newSalt != "") && newVaultKey == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{
+			"error": "修改密码需要同时提交重新加密的密码库密钥，请先解锁密码库后重试",
+		})
+		return
+	}
+
+	// 单事务写入，保证「密码 / 派生盐 / 密码库密钥」三者始终一致。
+	tx, err := s.DB.Begin()
+	if err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if req.NewPassword != "" {
 		newHash, err := auth.HashPassword(req.NewPassword)
 		if err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 			return
 		}
-		if _, err := s.DB.Exec(`UPDATE users SET username=?, email=?, password_hash=? WHERE id=?`, username, req.Email, newHash, claims.UserID); err != nil {
+		// 改密同时递增令牌版本：旧令牌全部失效（PT-06）。本次会话在提交后
+		// 重新签发（见函数末尾），避免用户刚改完密码就被登出。
+		if _, err := tx.Exec(`UPDATE users SET username=?, email=?, password_hash=?, token_version = COALESCE(token_version, 0) + 1 WHERE id=?`, username, req.Email, newHash, claims.UserID); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
 	} else {
-		if _, err := s.DB.Exec(`UPDATE users SET username=?, email=? WHERE id=?`, username, req.Email, claims.UserID); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET username=?, email=? WHERE id=?`, username, req.Email, claims.UserID); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
+	}
+	// 派生盐与密码库密钥必须成对更新（同一事务）。
+	if newSalt != "" || newVaultKey != "" {
+		if _, err := tx.Exec(`UPDATE users SET kdf_salt = ?, vault_key_enc = COALESCE(NULLIF(?, ''), vault_key_enc) WHERE id = ?`,
+			newSalt, newVaultKey, claims.UserID); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
 	}
 	detail := "修改账号信息"
 	if req.NewPassword != "" {
 		detail = "修改密码"
 	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "update_me", detail, clientIP(c))
-	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+	resp := gin.H{"status": "ok"}
+	// 改密后令牌版本已 +1，旧令牌即刻失效；这里为**当前会话**重新签发一个，
+	// 并把新令牌回给前端（同时刷新 Cookie），避免用户被自己登出。
+	if req.NewPassword != "" {
+		if tok, err := auth.GenerateToken(s.Cfg.JWTSecret, claims.UserID, username, claims.Role, db.TokenVersion(s.DB, claims.UserID)); err == nil {
+			setSessionCookie(c, tok)
+			resp["token"] = tok
+		}
+	}
+	writeJSON(c, http.StatusOK, resp)
 }
 
 // ---- 数据访问辅助 ----
 
-func (s *Server) listEntries(userID int64) ([]db.Entry, error) {
-	rows, err := s.DB.Query(`SELECT id, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at FROM entries WHERE user_id = ? AND deleted = 0 ORDER BY sort_order ASC, id ASC`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	list := []db.Entry{}
-	for rows.Next() {
-		var e db.Entry
-		var pwEnc, notesEnc string
-		if err := rows.Scan(&e.ID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt); err != nil {
-			return nil, err
-		}
-		if e.Password, err = crypto.AESDecryptString(s.EncKey, pwEnc); err != nil {
-			return nil, err
-		}
-		if e.Notes, err = crypto.AESDecryptString(s.EncKey, notesEnc); err != nil {
-			return nil, err
-		}
-		list = append(list, e)
-	}
-	return list, rows.Err()
-}
-
 // listEntriesAll 返回该用户的全部条目（含墓碑），用于同步 vault 上传/下载。
 func (s *Server) listEntriesAll(userID int64) ([]db.Entry, error) {
-	rows, err := s.DB.Query(`SELECT id, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted FROM entries WHERE user_id = ? ORDER BY sort_order ASC, id ASC`, userID)
+	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned FROM entries WHERE user_id = ? ORDER BY pinned DESC, sort_order ASC, id ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1025,56 +1293,52 @@ func (s *Server) listEntriesAll(userID int64) ([]db.Entry, error) {
 		var e db.Entry
 		var pwEnc, notesEnc string
 		var deleted int
-		if err := rows.Scan(&e.ID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted); err != nil {
+		var pinned bool
+		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned); err != nil {
 			return nil, err
 		}
-		if e.Password, err = crypto.AESDecryptString(s.EncKey, pwEnc); err != nil {
-			return nil, err
-		}
-		if e.Notes, err = crypto.AESDecryptString(s.EncKey, notesEnc); err != nil {
-			return nil, err
-		}
+		e.Pinned = &pinned
+		// 端到端加密：密文由客户端用 vault key 加密，服务端不透明存储。
+		e.Password = pwEnc
+		e.Notes = notesEnc
 		e.Deleted = deleted != 0
 		list = append(list, e)
 	}
 	return list, rows.Err()
 }
 
-func (s *Server) saveEntry(userID int64, e db.Entry) (db.Entry, error) {
-	pwEnc, err := crypto.AESEncryptString(s.EncKey, e.Password)
-	if err != nil {
-		return e, err
+// normalizeEntryUUID 返回条目的规范 uuid（PT-04）：
+//   - 合法 UUID → 统一小写后原样使用（客户端新版自带随机 v4）；
+//   - 空/非法 → 按 UUIDv5(user_id, id) 分配确定性标识。
+//
+// 这样旧版客户端（不带 uuid）与新版客户端对同一条目得到相同标识，迁移幂等。
+func normalizeEntryUUID(userID int64, e *db.Entry) string {
+	u := strings.ToLower(strings.TrimSpace(e.UUID))
+	if uuid.IsValid(u) {
+		return u
 	}
-	notesEnc, err := crypto.AESEncryptString(s.EncKey, e.Notes)
-	if err != nil {
-		return e, err
-	}
-	now := time.Now().Format(time.RFC3339)
-	if e.ID == 0 {
-		e.CreatedAt = now
-		e.UpdatedAt = now
-		// 新条目追加到末尾（序号为当前最大序号 + 1）
-		var maxSort int64
-		_ = s.DB.QueryRow(`SELECT COALESCE(MAX(sort_order), 0) FROM entries WHERE user_id = ? AND deleted = 0`, userID).Scan(&maxSort)
-		e.SortOrder = maxSort + 1
-		res, err := s.DB.Exec(`INSERT INTO entries (sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			e.SortOrder, userID, e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.CreatedAt, e.UpdatedAt)
-		if err != nil {
-			return e, err
-		}
-		e.ID, _ = res.LastInsertId()
-	} else {
-		e.UpdatedAt = now
-		_, err := s.DB.Exec(`UPDATE entries SET title=?, username=?, url=?, category=?, password_enc=?, notes_enc=?, updated_at=? WHERE id=? AND user_id=?`,
-			e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.UpdatedAt, e.ID, userID)
-		if err != nil {
-			return e, err
-		}
-	}
-	return e, nil
+	return uuid.Deterministic(userID, e.ID)
 }
 
 func (s *Server) replaceEntries(userID int64, list []db.Entry) error {
+	// 读取既有置顶状态（uuid 与 id 两个维度），用于「上传载荷未携带 pinned」的
+	// 条目保留原状态（典型：关闭置顶同步的桌面端按设备上传）。
+	storedPins := make(map[string]bool)
+	rows, err := s.DB.Query(`SELECT uuid, id, pinned FROM entries WHERE user_id = ? AND pinned = 1`, userID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var u string
+		var id, p int
+		if err := rows.Scan(&u, &id, &p); err == nil && p == 1 {
+			if u != "" {
+				storedPins["u:"+u] = true
+			}
+			storedPins["i:"+strconv.Itoa(id)] = true
+		}
+	}
+	rows.Close()
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
@@ -1083,26 +1347,65 @@ func (s *Server) replaceEntries(userID int64, list []db.Entry) error {
 		_ = tx.Rollback()
 		return err
 	}
-	for _, e := range list {
-		pwEnc, err := crypto.AESEncryptString(s.EncKey, e.Password)
-		if err != nil {
-			_ = tx.Rollback()
-			return err
+	// 1) 规范化 uuid，并按 uuid 去重（同请求内重复时保留最后一条）。
+	seenUUID := make(map[string]bool, len(list))
+	deduped := make([]db.Entry, 0, len(list))
+	for i := len(list) - 1; i >= 0; i-- {
+		e := list[i]
+		e.UUID = normalizeEntryUUID(userID, &e)
+		if seenUUID[e.UUID] {
+			continue
 		}
-		notesEnc, err := crypto.AESEncryptString(s.EncKey, e.Notes)
-		if err != nil {
-			_ = tx.Rollback()
-			return err
+		seenUUID[e.UUID] = true
+		deduped = append(deduped, e)
+	}
+	// 还原为客户端提交的先后顺序。
+	for i, j := 0, len(deduped)-1; i < j; i, j = i+1, j-1 {
+		deduped[i], deduped[j] = deduped[j], deduped[i]
+	}
+	// 2) id 唯一化：uuid 才是条目身份，若不同 uuid 撞了同一个 id，
+	//    直接丢弃会造成静默数据丢失，因此重新分配一个未占用的 id。
+	maxID := int64(0)
+	for _, e := range deduped {
+		if e.ID > maxID {
+			maxID = e.ID
 		}
+	}
+	usedID := make(map[int64]bool, len(deduped))
+	for i := range deduped {
+		if deduped[i].ID <= 0 || usedID[deduped[i].ID] {
+			maxID++
+			deduped[i].ID = maxID
+		}
+		usedID[deduped[i].ID] = true
+	}
+	for _, e := range deduped {
+		// 端到端加密：客户端已用 vault key 加密，服务端不透明存储。
+		pwEnc := e.Password
+		notesEnc := e.Notes
 		deleted := 0
 		if e.Deleted {
 			deleted = 1
 		}
-		_, err = tx.Exec(`INSERT INTO entries (id, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-			e.ID, e.SortOrder, userID, e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.CreatedAt, e.UpdatedAt, deleted)
+		// 置顶：载荷携带该字段（网页端编辑 / 已开启置顶同步的桌面端）→ 采纳；
+		// 未携带（关闭置顶同步的桌面端）→ 保留服务端已存状态，新条目视为未置顶。
+		pinned := false
+		if e.Pinned != nil {
+			pinned = *e.Pinned
+		} else {
+			key := "u:" + e.UUID
+			if e.UUID == "" {
+				key = "i:" + strconv.FormatInt(e.ID, 10)
+			}
+			pinned = storedPins[key]
+		}
+		_, err = tx.Exec(`INSERT INTO entries (id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.UUID, e.SortOrder, userID, e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.CreatedAt, e.UpdatedAt, deleted, pinned)
 		if err != nil {
 			_ = tx.Rollback()
-			return err
+			// 主键 (user_id,id) 与唯一索引 (user_id,uuid) 均在上面去重过，
+			// 正常不应再冲突；保留原始错误便于排查。
+			return fmt.Errorf("写入条目 id=%d uuid=%s 失败: %w", e.ID, e.UUID, err)
 		}
 	}
 	return tx.Commit()
@@ -1140,7 +1443,12 @@ func (s *Server) handleSendRegisterCode(c *gin.Context) {
 		writeJSON(c, http.StatusForbidden, gin.H{"error": "注册未开放，请联系管理员"})
 		return
 	}
-	if err := auth.SendVerifyCode(s.DB, req.Email, "register"); err != nil {
+	// 邮箱维度限流：避免同一邮箱被反复触发发信。
+	if !s.sendCodeEmail.Allow(strings.ToLower(req.Email)) {
+		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "验证码发送过于频繁，请稍后再试"})
+		return
+	}
+	if err := auth.SendVerifyCode(s.DB, s.EncKey, req.Email, "register"); err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1148,6 +1456,7 @@ func (s *Server) handleSendRegisterCode(c *gin.Context) {
 }
 
 // handleSendResetCode 发送密码重置验证码。
+// 无论邮箱是否已注册都返回同一响应，避免攻击者据此枚举有效邮箱。
 func (s *Server) handleSendResetCode(c *gin.Context) {
 	var req struct {
 		Email string `json:"email"`
@@ -1161,24 +1470,22 @@ func (s *Server) handleSendResetCode(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
 	}
+	// 邮箱维度限流：同一邮箱在窗口内只允许少量发码请求。
+	if !s.sendCodeEmail.Allow(strings.ToLower(req.Email)) {
+		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "验证码发送过于频繁，请稍后再试"})
+		return
+	}
 	var id int64
 	err := s.DB.QueryRow(`SELECT id FROM users WHERE email = ?`, req.Email).Scan(&id)
-	if err == sql.ErrNoRows {
-		writeJSON(c, http.StatusNotFound, gin.H{"error": "该邮箱未注册"})
-		return
-	}
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	if err := auth.SendVerifyCode(s.DB, req.Email, "reset"); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if err == nil {
+		// 仅在邮箱真实存在时发信；失败也不向调用方暴露差异。
+		_ = auth.SendVerifyCode(s.DB, s.EncKey, req.Email, "reset")
 	}
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
 
-// handleResetPassword 重置密码。
+// handleResetPassword 重置密码。验证码一次性消费 + 邮箱维度尝试上限，
+// 使 6 位数字验证码无法被在线穷举。
 func (s *Server) handleResetPassword(c *gin.Context) {
 	var req struct {
 		Email    string `json:"email"`
@@ -1190,8 +1497,18 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		return
 	}
 	req.Email = strings.TrimSpace(req.Email)
-	if req.Email == "" || len(req.Password) < 6 {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空，新密码至少 6 位"})
+	if req.Email == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
+		return
+	}
+	// 新口令沿用与改密一致的要求（长度 + 复杂度）。
+	if err := auth.ValidatePassword(s.DB, req.Password); err != nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// 必须在校验之前消费配额，否则限流形同虚设。
+	if !s.resetEmail.Allow(strings.ToLower(req.Email)) {
+		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "验证码尝试次数过多，请 15 分钟后重新获取"})
 		return
 	}
 	if !auth.CheckVerification(s.DB, req.Email, req.Code, "reset") {
@@ -1203,7 +1520,8 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	res, err := s.DB.Exec(`UPDATE users SET password_hash = ? WHERE email = ?`, hash, req.Email)
+	// 邮件重置口令同样递增令牌版本：重置前泄露的令牌立即失效（PT-06）。
+	res, err := s.DB.Exec(`UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE email = ?`, hash, req.Email)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -1222,8 +1540,9 @@ func (s *Server) handlePublicSettings(c *gin.Context) {
 		"email_verify_mode":        auth.EmailVerifyMode(s.DB),
 		"allow_registration":       auth.AllowRegistration(s.DB),
 		"password_min_length":      auth.PasswordMinLength(s.DB),
-		"password_require_complex": db.GetMeta(s.DB, "password_require_complex") == "true",
+		"password_require_complex": auth.PasswordRequireComplex(s.DB),
 		"default_language":         defaultLanguage(s.DB),
+		"recycle":                  db.GetMeta(s.DB, "recycle") != "false",
 		"site":                     db.LoadSiteConfig(s.DB),
 	})
 }
@@ -1231,12 +1550,12 @@ func (s *Server) handlePublicSettings(c *gin.Context) {
 // handleGetSettings 返回系统设置（SMTP 配置 + 邮箱验证模式 + 站点信息）。
 func (s *Server) handleGetSettings(c *gin.Context) {
 	writeJSON(c, http.StatusOK, gin.H{
-		"smtp":                     auth.LoadSMTPConfig(s.DB),
+		"smtp":                     auth.LoadSMTPConfig(s.DB, s.EncKey),
 		"smtp_enabled":             auth.SMTPEnabled(s.DB),
 		"email_verify_mode":        auth.EmailVerifyMode(s.DB),
 		"allow_registration":       db.GetMeta(s.DB, "allow_registration") == "true",
 		"password_min_length":      auth.PasswordMinLength(s.DB),
-		"password_require_complex": db.GetMeta(s.DB, "password_require_complex") == "true",
+		"password_require_complex": auth.PasswordRequireComplex(s.DB),
 		"recycle":                  db.GetMeta(s.DB, "recycle") != "false",
 		"recycle_days":             recycleDays(s.DB),
 		"site":                     db.LoadSiteConfig(s.DB),
@@ -1288,8 +1607,14 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	_ = db.SetMeta(s.DB, "smtp_port", strconv.Itoa(req.Port))
 	_ = db.SetMeta(s.DB, "smtp_username", req.Username)
 	_ = db.SetMeta(s.DB, "smtp_from", req.From)
-	if req.Password != "" {
-		_ = db.SetMeta(s.DB, "smtp_password", req.Password)
+	// SMTP 口令加密后落库（PT-07）；掩码值表示"保持原口令不变"。
+	if req.Password != "" && req.Password != auth.MaskedSecret {
+		enc, err := auth.EncryptSMTPPassword(s.EncKey, req.Password)
+		if err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "保存 SMTP 口令失败"})
+			return
+		}
+		_ = db.SetMeta(s.DB, "smtp_password", enc)
 	}
 	if req.SSL {
 		_ = db.SetMeta(s.DB, "smtp_ssl", "true")
@@ -1350,7 +1675,7 @@ func (s *Server) handleTestEmail(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "email 不能为空"})
 		return
 	}
-	if err := auth.SendHTMLEmail(s.DB, req.Email, "密匣 CryPtBox 测试邮件", auth.TestEmailHTML()); err != nil {
+	if err := auth.SendHTMLEmail(s.DB, s.EncKey, req.Email, "密匣 CryPtBox 测试邮件", auth.TestEmailHTML()); err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1359,7 +1684,7 @@ func (s *Server) handleTestEmail(c *gin.Context) {
 
 // handleExportSettings 导出系统配置（meta 中除 encryption_key 外的所有键值），供备份/迁移。
 func (s *Server) handleExportSettings(c *gin.Context) {
-	rows, err := s.DB.Query(`SELECT key, value FROM meta WHERE key != 'encryption_key' ORDER BY key`)
+	rows, err := s.DB.Query(`SELECT key, value FROM meta WHERE key != 'encryption_key' AND key != 'jwt_secret' ORDER BY key`)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -1371,12 +1696,63 @@ func (s *Server) handleExportSettings(c *gin.Context) {
 		if err := rows.Scan(&k, &v); err != nil {
 			continue
 		}
+		// 敏感字段掩码输出（PT-07）：导出件可能被分享/入库，不应携带可直接使用的口令。
+		if k == "smtp_password" && v != "" {
+			v = auth.MaskedSecret
+		}
 		meta[k] = v
 	}
 	writeJSON(c, http.StatusOK, gin.H{"meta": meta})
 }
 
-// handleImportSettings 导入系统配置（仅写入 meta 键值，忽略 encryption_key 避免覆盖加密密钥）。
+// importableMetaKeys 是允许通过「导入系统配置」写入的 meta 键白名单。
+// 采用白名单而非黑名单：新增系统键值不会被旧版本导入逻辑意外覆盖，
+// 且 encryption_key / jwt_secret 等密钥类字段天然不在其中。
+var importableMetaKeys = map[string]bool{
+	"email_verify_mode":        true,
+	"allow_registration":       true,
+	"password_min_length":      true,
+	"password_require_complex": true,
+	"recycle":                  true,
+	"recycle_days":             true,
+	"default_language":         true,
+	"site_footer_text":         true,
+	"smtp_host":                true,
+	"smtp_port":                true,
+	"smtp_username":            true,
+	"smtp_password":            true,
+	"smtp_from":                true,
+	"smtp_ssl":                 true,
+	"smtp_vendor":              true,
+	"smtp_enabled":             true,
+}
+
+// clampIntMeta 对数值型配置做范围钳制，避免被写入极端值（如超大密码长度要求）导致功能不可用。
+func clampIntMeta(key, v string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return ""
+	}
+	switch key {
+	case "password_min_length":
+		if n < 6 {
+			n = 6
+		}
+		if n > 128 {
+			n = 128
+		}
+	case "recycle_days":
+		if n < 1 {
+			n = 1
+		}
+		if n > 3650 {
+			n = 3650
+		}
+	}
+	return strconv.Itoa(n)
+}
+
+// handleImportSettings 导入系统配置（仅写入白名单内的 meta 键值，密钥类字段永不可覆盖）。
 func (s *Server) handleImportSettings(c *gin.Context) {
 	var req struct {
 		Meta map[string]string `json:"meta"`
@@ -1390,8 +1766,18 @@ func (s *Server) handleImportSettings(c *gin.Context) {
 		return
 	}
 	for k, v := range req.Meta {
-		if k == "" || k == "encryption_key" {
+		if !importableMetaKeys[k] {
 			continue
+		}
+		// 掩码值表示"保持原值"：导入由本应用导出的配置文件时不应把口令改成 ******。
+		if k == "smtp_password" && (v == auth.MaskedSecret || v == "") {
+			continue
+		}
+		if k == "password_min_length" || k == "recycle_days" {
+			v = clampIntMeta(k, v)
+			if v == "" {
+				continue
+			}
 		}
 		if err := db.SetMeta(s.DB, k, v); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -1470,15 +1856,36 @@ func (s *Server) handleGetAvatar(c *gin.Context) {
 		c.String(http.StatusNotFound, "not found")
 		return
 	}
+	c.Header("Cache-Control", "no-cache")
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(p)), ".")
-	ct := "image/" + ext
+	// SVG 可内嵌 <script>：对历史上传并残留的 svg 文件不再以可执行类型内联返回，
+	// 一律强制下载，避免在同源上下文中执行任意 JavaScript。
 	if ext == "svg" {
-		ct = "image/svg+xml"
-	} else if ext == "jpg" {
+		c.Header("Content-Disposition", "attachment")
+		c.Data(http.StatusOK, "application/octet-stream", data)
+		return
+	}
+	ct := "image/" + ext
+	if ext == "jpg" {
 		ct = "image/jpeg"
 	}
-	c.Header("Cache-Control", "no-cache")
 	c.Data(http.StatusOK, ct, data)
+}
+
+// detectImageExt 依据文件魔数判定真实图片类型，返回扩展名；无法识别返回空字符串。
+// 不使用客户端声明的扩展名，避免「声称 png 实为其它内容」的绕过。
+func detectImageExt(data []byte) string {
+	switch {
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):
+		return "png"
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF:
+		return "jpg"
+	case len(data) >= 6 && (bytes.Equal(data[:6], []byte("GIF87a")) || bytes.Equal(data[:6], []byte("GIF89a"))):
+		return "gif"
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "webp"
+	}
+	return ""
 }
 
 // handleUploadAvatar 上传当前用户的头像（body: base64 数据 + 扩展名）。
@@ -1497,14 +1904,15 @@ func (s *Server) handleUploadAvatar(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "图片数据无效"})
 		return
 	}
-	ext := strings.ToLower(strings.TrimPrefix(req.Ext, "."))
-	allowed := map[string]bool{"png": true, "jpg": true, "jpeg": true, "gif": true, "svg": true, "webp": true}
-	if !allowed[ext] {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "不支持的图片格式"})
-		return
-	}
 	if len(data) > 2*1024*1024 {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "图片不能超过 2MB"})
+		return
+	}
+	// 以文件魔数判定真实类型，忽略客户端声明的扩展名。
+	// SVG 已不再支持：其可内嵌脚本，作为同源资源返回会构成存储型 XSS。
+	ext := detectImageExt(data)
+	if ext == "" {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "不支持的图片格式（仅支持 PNG / JPG / GIF / WebP）"})
 		return
 	}
 	if err := os.MkdirAll(avatarDir(), 0o755); err != nil {

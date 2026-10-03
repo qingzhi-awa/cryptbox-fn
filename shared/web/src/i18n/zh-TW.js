@@ -1,14 +1,14 @@
 export default {
   app: { title: '密匣' },
   file: { template: '匯入範本' },
-  login: { username: '使用者名稱', usernameOrEmail: '使用者名稱 / 電子郵件', password: '密碼', submit: '登入', adminTitle: '管理員登入', adminOnly: '該帳號無管理員權限', setupTitle: '設定管理員帳號', setupHint: '首次使用，請設定管理員帳號和密碼', setupSubmit: '建立管理員並進入', register: '註冊', toRegister: '註冊帳號', forgot: '忘記密碼？', back: '返回登入', code: '信箱驗證碼', sendCode: '傳送驗證碼', newPassword: '新密碼', resetSubmit: '重設密碼', registerClosed: '註冊未開放，請聯絡管理員' },
+  login: { username: '使用者名稱', usernameOrEmail: '使用者名稱 / 電子郵件', password: '密碼', submit: '登入', adminTitle: '管理員登入', adminOnly: '該帳號無管理員權限', setupTitle: '設定管理員帳號', setupHint: '首次使用，請設定管理員帳號和密碼', setupSubmit: '建立管理員並進入', register: '註冊', toRegister: '註冊帳號', forgot: '忘記密碼？', back: '返回登入', code: '信箱驗證碼', sendCode: '傳送驗證碼', newPassword: '新密碼', resetSubmit: '重設密碼', registerClosed: '註冊未開放，請聯絡管理員', unlockTitle: '解鎖密碼庫', unlockHint: '請輸入帳號密碼解鎖密碼庫', unlockSubmit: '解鎖', unlockFailed: '解鎖失敗，請檢查密碼' },
   role: { admin: '管理員', user: '使用者', superadmin: '超級管理員' },
   header: { logout: '登出', lock: '鎖定' },
   tabs: { passwords: '我的密碼', trash: '回收站', users: '使用者管理', logs: '操作日誌', settings: '系統設定' },
   logs: { empty: '暫無日誌' },
   settings: { smtp: 'SMTP 設定', host: 'SMTP 伺服器', hostPlaceholder: '例如 smtp.example.com', port: '連接埠', username: '使用者名稱', usernamePlaceholder: '例如 you{\'@\'}example.com', password: '密碼', passwordHint: '留空則不修改', from: '寄件人地址', fromPlaceholder: '例如 you{\'@\'}example.com', ssl: '使用 SSL', verifyMode: '信箱驗證模式', modeCode: '驗證碼驗證', modeNone: '不驗證（僅校驗格式）', vendor: '服務提供者', vendorCustom: '自訂', email: '電子郵件地址', emailPlaceholder: '請輸入完整信箱，例如 you{\'@\'}qq.com', authCode: '授權碼', authCodePlaceholder: '請輸入信箱授權碼（非登入密碼）', howToAuthCode: '如何取得授權碼', vendorAuthHelp: 'QQ/126/163 信箱需在「信箱設定 → 帳號」中開啟 IMAP/SMTP 服務，並使用系統產生的授權碼（非登入密碼）登入。\nGmail 需開啟兩步驟驗證，並在「Google 帳號 → 安全 → 應用程式密碼」中產生。\nOutlook/Office 365 一般需在「安全性資訊」中建立應用程式密碼。', secureMode: '使用安全連線', sslSecure: 'SSL（建議）', tlsSecure: 'STARTTLS (TLS)', noSecure: '不加密（不建議）', qqTip: '提示：請確認防火牆未阻擋 465 連接埠', '126Tip': '提示：請確認防火牆未阻擋 465 連接埠', '163Tip': '提示：請確認防火牆未阻擋 465 連接埠', gmailTip: '提示：請確認防火牆未阻擋 587 連接埠', outlookTip: '提示：請確認防火牆未阻擋 587 連接埠', siteTitle: '站點資訊', footerText: '頁腳文字', icpNumber: 'ICP 備案號', beianNumber: '網安備案號', telecomLicense: '增值電信業務經營許可證', softwareCopyright: '軟體著作權號', copyrightEnabled: '商標/版權保護', copyrightText: '版權保護文字', on: '開啟', off: '關閉', registerTitle: '註冊設定', allowRegistration: '允許註冊', passwordMinLength: '密碼最小長度', requireComplex: '密碼需含字母和數字', recycleTitle: '回收站', recycle: '刪除走回收站', recycleDays: '回收站保留天數', sendTest: '發送測試郵件', testEmailPlaceholder: '測試郵箱地址', testEmailRequired: '請輸入測試郵箱地址', testSent: '測試郵件已發送' },
   toolbar: { search: '搜尋標題 / 使用者名稱 / 網址 / 分類', add: '+ 新增', io: '匯入 / 匯出', import: '匯入', export: '匯出', exportCsv: '匯出 CSV', template: '下載匯入範本' },
-  list: { empty: '暫無記錄', show: '查看', hide: '隱藏', edit: '編輯', delete: '刪除', copy: '複製', none: '無' },
+  list: { empty: '暫無記錄', show: '查看', hide: '隱藏', edit: '編輯', delete: '刪除', copy: '複製', none: '無', pin: '置頂', unpin: '取消置頂', dragHint: '按住拖動可調整順序' },
   modal: {
     addTitle: '新增密碼',
     editTitle: '編輯密碼',
@@ -53,6 +53,10 @@ export default {
   },
   msg: {
     copied: '已複製',
+    pinned: '已置頂',
+    unpinned: '已取消置頂',
+    pinGroupLocked: '置頂條目需先取消置頂才能拖到普通區域',
+    pinNeedSave: '請先儲存條目（產生標識後再置頂）',
     titleRequired: '標題不能為空',
     saved: '已儲存',
     deleted: '已刪除',
@@ -70,7 +74,10 @@ export default {
     enabled: '已啟用',
     disabled: '已停用',
     codeSent: '驗證碼已傳送',
-    resetDone: '密碼已重設，請登入'
+    resetDone: '密碼已重設，請登入',
+    cryptoUnavailable: '目前環境不支援加密（需要 HTTPS 或 localhost）',
+    decryptFailed: '部分條目解密失敗，請確認主密碼是否正確',
+    migrated: '已遷移 {n} 筆舊資料'
   },
   trash: {
     empty: '回收站為空',

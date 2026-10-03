@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: 'インポートテンプレート' },
-  login: { username: 'ユーザー名', usernameOrEmail: 'ユーザー名 / メール', password: 'パスワード', submit: 'ログイン', adminTitle: '管理者ログイン', adminOnly: 'このアカウントには管理者権限がありません', setupTitle: '管理者アカウント設定', setupHint: '初回利用です。管理者アカウントとパスワードを設定してください', setupSubmit: '管理者を作成して開始', register: '登録', toRegister: '新規登録', forgot: 'パスワードをお忘れですか？', back: 'ログインに戻る', code: '認証コード', sendCode: 'コード送信', newPassword: '新しいパスワード', resetSubmit: 'パスワードを再設定', registerClosed: '登録は停止中です。管理者にお問い合わせください' },
+  login: { username: 'ユーザー名', usernameOrEmail: 'ユーザー名 / メール', password: 'パスワード', submit: 'ログイン', adminTitle: '管理者ログイン', adminOnly: 'このアカウントには管理者権限がありません', setupTitle: '管理者アカウント設定', setupHint: '初回利用です。管理者アカウントとパスワードを設定してください', setupSubmit: '管理者を作成して開始', register: '登録', toRegister: '新規登録', forgot: 'パスワードをお忘れですか？', back: 'ログインに戻る', code: '認証コード', sendCode: 'コード送信', newPassword: '新しいパスワード', resetSubmit: 'パスワードを再設定', registerClosed: '登録は停止中です。管理者にお問い合わせください', unlockTitle: '保管庫のロック解除', unlockHint: 'アカウントのパスワードを入力して保管庫をロック解除します', unlockSubmit: 'ロック解除', unlockFailed: 'ロック解除に失敗しました。パスワードをご確認ください' },
   role: { admin: '管理者', user: 'ユーザー', superadmin: 'スーパー管理者' },
   header: { logout: 'ログアウト', lock: 'ロック' },
   tabs: { passwords: 'マイパスワード', trash: 'ゴミ箱', users: 'ユーザー管理', logs: '操作ログ', settings: 'システム設定' },
@@ -67,7 +67,10 @@ export default {
     enabled: '有効化しました',
     disabled: '無効化しました',
     codeSent: '認証コードを送信しました',
-    resetDone: 'パスワードを再設定しました。ログインしてください'
+    resetDone: 'パスワードを再設定しました。ログインしてください',
+    cryptoUnavailable: 'この環境では暗号化を利用できません（HTTPS または localhost が必要です）',
+    decryptFailed: '一部の項目を復号できませんでした。マスターパスワードをご確認ください',
+    migrated: '旧データを {n} 件移行しました'
   },
   trash: {
     empty: 'ゴミ箱は空です',

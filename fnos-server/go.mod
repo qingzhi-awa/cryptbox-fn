@@ -2,6 +2,8 @@ module github.com/qingzhi-awa/cryptbox/fnos-server
 
 go 1.26
 
+toolchain go1.26.6
+
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/qingzhi-awa/cryptbox/shared v0.0.0

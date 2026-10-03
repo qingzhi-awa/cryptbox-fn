@@ -1,14 +1,14 @@
 export default {
   app: { title: '密匣' },
-  file: { template: '导入模板' },
-  login: { username: '用户名', usernameOrEmail: '用户名 / 邮箱', password: '密码', submit: '登录', adminTitle: '管理员登录', adminOnly: '该账号无管理员权限', setupTitle: '设置管理员账号', setupHint: '首次使用，请设置管理员账号和密码', setupSubmit: '创建管理员并进入', register: '注册', toRegister: '注册账号', forgot: '忘记密码？', back: '返回登录', code: '邮箱验证码', sendCode: '发送验证码', newPassword: '新密码', resetSubmit: '重置密码', registerClosed: '注册未开放，请联系管理员' },
+  file: { template: '密码导入模板' },
+  login: { username: '用户名', usernameOrEmail: '用户名 / 邮箱', password: '密码', submit: '登录', adminTitle: '管理员登录', adminOnly: '该账号无管理员权限', setupTitle: '设置管理员账号', setupHint: '首次使用，请设置管理员账号和密码', setupSubmit: '创建管理员并进入', register: '注册', toRegister: '注册账号', forgot: '忘记密码？', back: '返回登录', code: '邮箱验证码', sendCode: '发送验证码', newPassword: '新密码', resetSubmit: '重置密码', registerClosed: '注册未开放，请联系管理员', unlockTitle: '解锁密码库', unlockHint: '请输入账号密码解锁密码库', unlockSubmit: '解锁', unlockFailed: '解锁失败：密码不正确，或密码库密钥与当前密码不匹配。若你曾修改过密码，请点下方「无法解锁？」用修改前的旧密码恢复数据', recoverTitle: '无法解锁？', recoverHint: '如果账号密码曾被重置，原密码库仍由旧密码加密：可输入旧密码恢复全部数据（推荐），或清空后重新开始。', recoverOldPassword: '重置前使用的旧密码', recoverSubmit: '用旧密码恢复密码库', recoverNeedBoth: '请先输入当前密码与旧密码', recoverFailed: '旧密码不正确，无法恢复原密码库', resetVault: '清空密码库重新开始', resetVaultConfirm: '确定清空密码库？服务端保存的旧密文将被删除，此操作不可恢复。建议先尝试用旧密码恢复。' },
   role: { admin: '管理员', user: '用户', superadmin: '超级管理员' },
   header: { logout: '退出', lock: '锁定' },
-  tabs: { passwords: '我的密码', trash: '回收站', users: '用户管理', logs: '操作日志', settings: '系统设置' },
+  tabs: { passwords: '我的密码', trash: '回收站', users: '用户管理', logs: '操作日志', settings: '系统设置', about: '关于' },
   logs: { empty: '暂无日志' },
   settings: { smtp: 'SMTP 配置', host: 'SMTP 服务器', hostPlaceholder: '例如 smtp.example.com', port: '端口', username: '用户名', usernamePlaceholder: '例如 you{\'@\'}example.com', password: '密码', passwordHint: '留空则不修改', from: '发件人地址', fromPlaceholder: '例如 you{\'@\'}example.com', ssl: '使用 SSL', verifyMode: '邮箱验证模式', modeCode: '验证码验证', modeNone: '不验证（仅校验格式）', vendor: '服务提供商', vendorCustom: '自定义', email: '邮箱地址', emailPlaceholder: '请输入完整邮箱地址，例如 you{\'@\'}qq.com', authCode: '授权码', authCodePlaceholder: '请输入邮箱授权码（非登录密码）', howToAuthCode: '如何获取授权码', vendorAuthHelp: 'QQ/126/163 邮箱需在「邮箱设置 → 账号」中开启 IMAP/SMTP 服务，并使用系统生成的授权码（非登录密码）登录。\nGmail 需要开启两步验证，并在「Google 账号 → 安全 → 应用专用密码」中生成。\nOutlook/Office 365 一般需在「安全信息」中创建应用专用密码。', secureMode: '使用安全连接', sslSecure: 'SSL（推荐）', tlsSecure: 'STARTTLS (TLS)', noSecure: '不加密（不推荐）', qqTip: '提示：请检查防火墙出站规则没有屏蔽 465 端口', '126Tip': '提示：请检查防火墙出站规则没有屏蔽 465 端口', '163Tip': '提示：请检查防火墙出站规则没有屏蔽 465 端口', gmailTip: '提示：请检查防火墙出站规则没有屏蔽 587 端口', outlookTip: '提示：请检查防火墙出站规则没有屏蔽 587 端口', siteTitle: '站点信息', footerText: '页脚文字', icpNumber: 'ICP 备案号', beianNumber: '网安备案号', telecomLicense: '增值电信业务经营许可证', softwareCopyright: '软件著作权号', copyrightEnabled: '商标/版权保护', copyrightText: '版权保护文字', on: '开启', off: '关闭', registerTitle: '注册设置', allowRegistration: '允许注册', passwordMinLength: '密码最小长度', requireComplex: '密码需含字母和数字', recycleTitle: '回收站', recycle: '删除走回收站', recycleDays: '回收站保留天数', sendTest: '发送测试邮件', testEmailPlaceholder: '测试邮箱地址', testEmailRequired: '请输入测试邮箱地址', testSent: '测试邮件已发送', exportConfig: '导出配置', importConfig: '导入配置' },
-  toolbar: { search: '搜索标题 / 用户名 / 网址 / 分类', add: '+ 新增', io: '导入 / 导出', import: '导入', export: '导出', exportCsv: '导出 CSV', template: '下载导入模板' },
-  list: { empty: '暂无记录', show: '查看', hide: '隐藏', edit: '编辑', delete: '删除', copy: '复制', none: '无' },
+  toolbar: { search: '搜索标题 / 用户名 / 网址 / 分类', add: '+ 新增', io: '导入 / 导出', import: '导入', export: '导出', exportCsv: '导出 CSV', template: '下载密码模板' },
+  list: { empty: '暂无记录', show: '查看', hide: '隐藏', edit: '编辑', delete: '删除', copy: '复制', none: '无', pin: '置顶', unpin: '取消置顶', dragHint: '按住拖动可调整顺序' },
   modal: {
     addTitle: '新增密码',
     editTitle: '编辑密码',
@@ -39,9 +39,16 @@ export default {
     editTitle: '编辑用户',
     passwordHint: '留空则不修改',
     import: '导入用户',
-    template: '下载导入模板',
+    template: '用户信息导入模板',
+    templateBtn: '下载用户模板',
+    export: '导出用户',
+    statusLabel: '状态',
+    createdAt: '创建时间',
     empty: '暂无用户'
   },
+  about: { changelog: '更新日志', current: '当前', website: '官网链接', github: 'GitHub开源地址' },
+  theme: { title: '颜色模式', auto: '自动（跟随系统）', light: '浅色模式', dark: '深色模式' },
+  tpl: { site: '示例网站', user: 'myuser', pass: 'MyPass123', url: 'https://example.com', category: '常用', notes: '这是一条示例备注，可删除', uName: 'user1', uPass: 'pass123456', uEmail: 'user1@example.com', uRole: '普通用户' },
   me: {
     title: '我的账号',
     username: '用户名',
@@ -53,6 +60,14 @@ export default {
   },
   msg: {
     copied: '已复制',
+    pinned: '已置顶',
+    unpinned: '已取消置顶',
+    pinGroupLocked: '置顶条目需先取消置顶才能拖到普通区域',
+    pinNeedSave: '请先保存条目（生成标识后再置顶）',
+    // 修改密码/用户名会更换主密钥，必须先解锁密码库才能重新加密密钥（否则旧数据将无法解密）
+    unlockRequiredForCredentialChange: '请先解锁密码库再修改密码或用户名：解锁后本页才能用新密码重新加密你的密码库密钥，否则原有数据将无法解密。',
+    // 会话失效/接口异常（网关未正确转发接口时也会走到这里）
+    sessionInvalid: '未能获取账号信息，请重新登录；若持续出现，请检查访问地址是否为密匣应用入口。',
     titleRequired: '标题不能为空',
     usernameRequired: '用户名不能为空',
     emailRequired: '邮箱不能为空',
@@ -62,6 +77,7 @@ export default {
     deleted: '已删除',
     exported: '已导出 {n} 条',
     exportedCsv: '已导出 {n} 条 CSV',
+    userExported: '已导出 {n} 个用户',
     imported: '已导入 {n} 条',
     confirmDelete: '确定删除「{title}」？',
     confirmDeleteUser: '确定删除用户「{username}」？其密码数据也会被删除。',
@@ -74,7 +90,10 @@ export default {
     enabled: '已启用',
     disabled: '已停用',
     codeSent: '验证码已发送',
-    resetDone: '密码已重置，请登录'
+    resetDone: '密码已重置，请登录',
+    cryptoUnavailable: '当前环境不支持加密（需要 HTTPS 或 localhost）',
+    decryptFailed: '部分条目解密失败，请确认主密码是否正确',
+    migrated: '已迁移 {n} 条旧数据'
   },
   trash: {
     empty: '回收站为空',

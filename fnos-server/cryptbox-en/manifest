@@ -1,8 +1,8 @@
 appname               = cryptbox
-version               = 0.2.3
+version               = 0.2.34
 display_name          = CryPtBox
 desc                  = CryPtBox is a local-first, cross-platform password manager with optional cloud sync. The client and server are both open source.
-platform              = x86
+platform              = arm
 source                = thirdparty
 maintainer            = CryPtBox
 maintainer_url        = https://cryptbox.fnosp.com
@@ -12,4 +12,4 @@ service_port          = 5201
 checkport             = true
 desktop_uidir         = ui
 desktop_applaunchname = cryptbox.Application
-changelog             = ✅ 1. Fix login issues\n[Login] Fix incorrect password error message\n[Login] Fix bug where user info and sync buttons fail to load after login\n✅ 2. Improve delete operation\nReplace native dialogs with built-in custom confirmation dialogs for safer, unified operations\n✅ 3. New Recycle Bin feature\n[Recycle Bin] Soft-delete data, keep complete data, support recovery\n[Recycle Bin] Support list view, restore, permanent delete, empty all\n[Recycle Bin] Built-in auto-cleanup of expired items\n[Recycle Bin] Support toggling recycle bin and custom retention days (default 30 days)\n[Recycle Bin] Support per-user settings and server-side global configuration\n✅ 4. New user management\n[Users] Add users (username/email/password/role required)\n[Users] Support import, delete, update, enable/disable users\n[Users] Separate admin and regular user permissions\n✅ 5. New operation logs\n[Logs] Record key operations such as login, CRUD, and config changes\n✅ 6. Improve system settings\n[Settings] SMTP config with QQ/126/163/Gmail/Outlook presets\n[Settings] Send test email to verify config\n[Settings] Export/import system config as JSON\n✅ 7. Improve account system\n[Account] Register and reset password via email verification code\n[Account] Avatar upload\n✅ 8. Improve multi-device sync\n[Sync] JWT auth with one-click upload/download/merge\n✅ 9. Improve install wizard\n[Wizard] Configure super admin account (username/password/email)\n[Wizard] SMTP provider dropdown, terms agreement, test email required before install\n✅ 10. Security hardening\n[Security] Remove gateway forced auth, use account password (JWT) only\n✅ 11. Improve multi-language support\n[Language] Fix incomplete translations in client and server
+changelog             = ✅ 1. Pin sync (account-level setting)\n[New] Choose whether pinned entries sync across devices: when enabled, pin changes on any device or the web UI propagate everywhere\n[Note] When disabled, desktop pins stay per device and web pins stay per account (previous behavior)\n✅ 2. Server\n[New] entries.pinned column kept in vault sync; new /api/vault/pin-sync endpoint

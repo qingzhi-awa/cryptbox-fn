@@ -1,7 +1,7 @@
 export default {
   app: { title: 'CryPtBox' },
   file: { template: 'Import-Vorlage' },
-  login: { username: 'Benutzername', usernameOrEmail: 'Benutzername / E-Mail', password: 'Passwort', submit: 'Anmelden', adminTitle: 'Admin-Anmeldung', adminOnly: 'Dieses Konto hat keine Administratorrechte', setupTitle: 'Admin-Konto einrichten', setupHint: 'Erste Verwendung, Admin-Konto und Passwort einrichten', setupSubmit: 'Admin erstellen & starten', register: 'Registrieren', toRegister: 'Registrieren', forgot: 'Passwort vergessen?', back: 'Zurück zur Anmeldung', code: 'Bestätigungscode', sendCode: 'Code senden', newPassword: 'Neues Passwort', resetSubmit: 'Passwort zurücksetzen', registerClosed: 'Registrierung geschlossen, bitte Administrator kontaktieren' },
+  login: { username: 'Benutzername', usernameOrEmail: 'Benutzername / E-Mail', password: 'Passwort', submit: 'Anmelden', adminTitle: 'Admin-Anmeldung', adminOnly: 'Dieses Konto hat keine Administratorrechte', setupTitle: 'Admin-Konto einrichten', setupHint: 'Erste Verwendung, Admin-Konto und Passwort einrichten', setupSubmit: 'Admin erstellen & starten', register: 'Registrieren', toRegister: 'Registrieren', forgot: 'Passwort vergessen?', back: 'Zurück zur Anmeldung', code: 'Bestätigungscode', sendCode: 'Code senden', newPassword: 'Neues Passwort', resetSubmit: 'Passwort zurücksetzen', registerClosed: 'Registrierung geschlossen, bitte Administrator kontaktieren', unlockTitle: 'Tresor entsperren', unlockHint: 'Geben Sie Ihr Kontopasswort ein, um den Tresor zu entsperren', unlockSubmit: 'Entsperren', unlockFailed: 'Entsperren fehlgeschlagen, bitte Passwort prüfen' },
   role: { admin: 'Administrator', user: 'Benutzer', superadmin: 'Super-Administrator' },
   header: { logout: 'Abmelden', lock: 'Sperren' },
   tabs: { passwords: 'Meine Passwörter', trash: 'Papierkorb', users: 'Benutzerverwaltung', logs: 'Betriebsprotokoll', settings: 'Systemeinstellungen' },
@@ -67,7 +67,10 @@ export default {
     enabled: 'Aktiviert',
     disabled: 'Deaktiviert',
     codeSent: 'Bestätigungscode gesendet',
-    resetDone: 'Passwort zurückgesetzt, bitte anmelden'
+    resetDone: 'Passwort zurückgesetzt, bitte anmelden',
+    cryptoUnavailable: 'Verschlüsselung nicht verfügbar (HTTPS oder localhost erforderlich)',
+    decryptFailed: 'Einige Einträge konnten nicht entschlüsselt werden, bitte Master-Passwort prüfen',
+    migrated: '{n} alte Einträge migriert'
   },
   trash: {
     empty: 'Der Papierkorb ist leer',

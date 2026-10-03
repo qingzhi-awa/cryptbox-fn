@@ -3,6 +3,8 @@ package auth
 
 import (
 	"errors"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -10,8 +12,12 @@ import (
 )
 
 // HashPassword 使用 bcrypt 哈希密码。
+// bcryptCost 口令哈希成本：12（约 4 倍于默认 10 的暴力破解代价）。
+// 存量用户口令不受影响，仅在下次设置/修改口令时按新成本计算。
+const bcryptCost = 12
+
 func HashPassword(pw string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcryptCost)
 	if err != nil {
 		return "", err
 	}
@@ -24,21 +30,43 @@ func CheckPassword(hash, pw string) bool {
 }
 
 // Claims JWT 载荷。
+//
+// TokenVer 为「令牌版本」（PT-06）：与 users.token_version 比对，不一致即视为失效。
+// JWT 本身无法吊销，该字段补上了「改密码后旧令牌立即作废」的能力。
 type Claims struct {
 	UserID   int64  `json:"uid"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	TokenVer int64  `json:"ver"`
 	jwt.RegisteredClaims
 }
 
-// GenerateToken 签发 7 天有效的 JWT。
-func GenerateToken(secret string, userID int64, username, role string) (string, error) {
+// TokenTTL 是签发的 JWT 有效期，默认 24 小时。
+//
+// 服务端每次请求都回查 users.status / token_version，可即时吊销；缩短有效期可
+// 进一步缩小 token 泄露后的可用窗口。可用环境变量 TOKEN_TTL_HOURS 覆盖（1..168）。
+var TokenTTL = func() time.Duration {
+	const def = 24 * time.Hour
+	v := os.Getenv("TOKEN_TTL_HOURS")
+	if v == "" {
+		return def
+	}
+	h, err := strconv.Atoi(v)
+	if err != nil || h < 1 || h > 168 {
+		return def
+	}
+	return time.Duration(h) * time.Hour
+}()
+
+// GenerateToken 签发有效期为 TokenTTL 的 JWT。tokenVer 与用户当前的令牌版本一致。
+func GenerateToken(secret string, userID int64, username, role string, tokenVer int64) (string, error) {
 	claims := Claims{
 		UserID:   userID,
 		Username: username,
 		Role:     role,
+		TokenVer: tokenVer,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(TokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
