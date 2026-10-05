@@ -153,7 +153,12 @@ func TestVaultRecoveryAfterPasswordReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-wrap: %v", err)
 	}
+	// R13-02 之后：账号已有 vault_key_enc，改写必须携带当前口令。
 	code, _ = doJSON(t, r, http.MethodPut, "/api/vault-key", newToken, map[string]any{"vault_key_enc": rewrapped})
+	if code != http.StatusBadRequest {
+		t.Fatalf("缺少当前口令时改写既有 vault_key_enc 应被拒绝: code=%d", code)
+	}
+	code, _ = doJSON(t, r, http.MethodPut, "/api/vault-key", newToken, map[string]any{"vault_key_enc": rewrapped, "current_password": newPw})
 	if code != http.StatusOK {
 		t.Fatalf("put re-wrapped vault key: code=%d", code)
 	}

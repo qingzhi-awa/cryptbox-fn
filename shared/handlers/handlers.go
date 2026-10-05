@@ -261,7 +261,10 @@ func (s *Server) register(r *gin.Engine) {
 			authed.POST("/vault-key", s.handlePutVaultKey)
 			authed.POST("/me/update", s.handleUpdateMe)
 			// 自助改绑邮箱：向新邮箱发送所有权验证码（R7-01）。
-			authed.POST("/me/email-code", s.handleSendMyEmailCode)
+			// 除「按收件地址 3 次/15 分」（sendCodeEmail）外，必须再叠加「按来源 IP」
+			// 维度（sendCodeIP，与 /register/send-code、/reset/send-code 同桶）：
+			// 否则登录用户可轮换收件地址无限发信，把服务器当邮件轰炸器（R13-01）。
+			authed.POST("/me/email-code", s.ipLimit(s.sendCodeIP, "验证码发送过于频繁，请稍后再试"), s.handleSendMyEmailCode)
 
 			// 管理员
 			admin := authed.Group("", s.adminMiddleware())
@@ -844,11 +847,18 @@ func (s *Server) handleLegacyMigrationDone(c *gin.Context) {
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
 
-// handlePutVaultKey 上传端到端加密的 vault key（用 master key 加密后的密文）。
+// handlePutVaultKey 更新「用主密钥包裹后的密码库密钥」。
+//
+// 口令再验证规则（R13-02）：账号**尚无** vault_key_enc（首次启用端到端加密）时允许
+// 直接写入——此时没有既有解锁材料可被破坏；一旦已有 vault_key_enc，改写就是解锁材料
+// 变更，必须携带正确的当前口令。否则持有泄露令牌者可把密文覆盖为任意值：正确口令
+// 解不开、「旧密码恢复」也解不开（旧主密钥同样解不开垃圾密文），密码库永久无法解锁，
+// 只剩「清空重建」一条路（不可逆数据丢失）。
 func (s *Server) handlePutVaultKey(c *gin.Context) {
 	claims := currentClaims(c)
 	var req struct {
-		VaultKeyEnc string `json:"vault_key_enc"`
+		VaultKeyEnc     string `json:"vault_key_enc"`
+		CurrentPassword string `json:"current_password"`
 	}
 	if err := readJSON(c, &req); err != nil {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -856,6 +866,15 @@ func (s *Server) handlePutVaultKey(c *gin.Context) {
 	}
 	if req.VaultKeyEnc == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "vault_key_enc 不能为空"})
+		return
+	}
+	var currentEnc, currentHash string
+	if err := s.DB.QueryRow(`SELECT COALESCE(vault_key_enc, ''), password_hash FROM users WHERE id = ?`, claims.UserID).Scan(&currentEnc, &currentHash); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if strings.TrimSpace(currentEnc) != "" && !auth.CheckPassword(currentHash, req.CurrentPassword) {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "重新包裹密码库密钥需要当前密码"})
 		return
 	}
 	if _, err := s.DB.Exec(`UPDATE users SET vault_key_enc = ? WHERE id = ?`, req.VaultKeyEnc, claims.UserID); err != nil {
@@ -1251,6 +1270,13 @@ func (s *Server) handleImportUsers(c *gin.Context) {
 			skipped++
 			continue
 		}
+		// 保留用户名（R11-03）：批量导入是第 4 条建号路径，必须与 handleCreateUser /
+		// handleUpdateUser / handleUpdateMe 同口径拒绝 admin/root/superadmin/system。
+		// 否则可导入与超管同名的普通账号，突破"用户名≠角色"的纵深防御约定。
+		if isReservedUsername(username) {
+			skipped++
+			continue
+		}
 		role := "user"
 		rl := strings.TrimSpace(u.Role)
 		if rl == "admin" || rl == "管理员" || rl == "管理員" {
@@ -1619,7 +1645,14 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 			return
 		}
 	}
-	if req.NewPassword != "" || usernameChanged || emailChanged {
+	// 解锁材料（派生盐 kdf_salt / 包裹后的密码库密钥 vault_key_enc）与口令、用户名、
+	// 邮箱同属账号身份，任何实际改写都必须做当前口令再验证（R13-02）：否则持有泄露
+	// 令牌的攻击者可把 kdf_salt 改成任意值，使正确口令再也派生不出能解开
+	// vault_key_enc 的主密钥 —— 密码库永久无法解锁，且「旧密码恢复」同样救不回
+	// （旧主密钥解不开被改写后的密文），只能清空重建。
+	newSalt := strings.TrimSpace(req.KdfSalt)
+	newVaultKey := strings.TrimSpace(req.VaultKeyEnc)
+	if req.NewPassword != "" || usernameChanged || emailChanged || newSalt != "" || newVaultKey != "" {
 		if !auth.CheckPassword(currentHash, req.CurrentPassword) {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": "当前密码错误"})
 			return
@@ -1652,8 +1685,6 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 	// 一致性保护：密码或派生盐变更会改变主密钥，若账号已存在 vault_key_enc，
 	// 必须同时提交用新主密钥重新加密的 vault_key_enc —— 否则旧密文将永久无法解密。
 	// 客户端未解锁密码库时应拒绝改密（无法重新包裹密钥）。
-	newSalt := strings.TrimSpace(req.KdfSalt)
-	newVaultKey := strings.TrimSpace(req.VaultKeyEnc)
 	var currentVaultKey string
 	if err := s.DB.QueryRow(`SELECT COALESCE(vault_key_enc, '') FROM users WHERE id = ?`, claims.UserID).Scan(&currentVaultKey); err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})

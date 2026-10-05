@@ -633,8 +633,10 @@ function nowRfc3339() {
 
 function csvEscape(v) {
   v = String(v == null ? '' : v)
-  // 公式注入防护：= + - @ 等开头的字段会被 Excel/WPS 当作公式执行，前置单引号强制按文本处理。
-  if (/^[=+\-@\t\r]/.test(v)) v = "'" + v
+  // 公式注入防护：以 = + - @ 开头的字段会被 Excel/WPS 当作公式执行，前置单引号强制按文本处理。
+  // R11-10：Excel/WPS 会忽略单元格里的**前导空白**，因此 " =1+1" 这类同样危险，
+  // 判定必须纵向拉开到第一个非空白字符（原正则只检查首字符，可被前导空格绕过）。
+  if (/^[\s]*[=+\-@\t\r]/.test(v)) v = "'" + v
   if (/[",\n\r]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"'
   return v
 }
@@ -1085,7 +1087,7 @@ export default {
         // 首次启用端到端加密（含历史账号）：生成 vault key 并上传。
         vk = vault.randomBytes(32)
         const enc = await vault.encryptVaultKey(masterKey, vk)
-        await api.putVaultKey(enc, this.token)
+        await api.putVaultKey(enc, this.token, password)
         this.vaultKeyEnc = enc
       } else {
         vk = await vault.decryptVaultKey(masterKey, vaultKeyEnc)
@@ -1146,7 +1148,8 @@ export default {
         const salt = this.kdfSalt || usedSalt
         const newMaster = await vault.deriveMasterKey(this.unlockForm.password, salt)
         const enc = await vault.encryptVaultKey(newMaster, vk)
-        await api.putVaultKey(enc, this.token)
+        // 账号已有 vault_key_enc，改写解锁材料须带当前口令（R13-02）。
+        await api.putVaultKey(enc, this.token, this.unlockForm.password)
         this.vaultKeyEnc = enc
         vault.setVaultKey(vk)
         this.vaultRecovery = false

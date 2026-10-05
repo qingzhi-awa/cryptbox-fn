@@ -134,7 +134,10 @@ export default {
   // 接管并返回其首页（HTTP 200 非 JSON）。服务端同时保留了 PUT/DELETE 供直连使用。
   getVault: (t) => request('GET', '/api/vault', undefined, t),
   putVault: (entries, t) => request('POST', '/api/vault', { entries }, t),
-  putVaultKey: (vaultKeyEnc, t) => request('POST', '/api/vault-key', { vault_key_enc: vaultKeyEnc }, t),
+  // 重新包裹密码库密钥。R13-02：账号已有 vault_key_enc 时属于解锁材料变更，必须携带
+  // 当前口令（否则服务端拒绝）；首次启用（服务端为空）时 service 端不校验，传空串即可。
+  putVaultKey: (vaultKeyEnc, t, currentPassword = '') =>
+    request('POST', '/api/vault-key', { vault_key_enc: vaultKeyEnc, current_password: currentPassword }, t),
   // 密码重置后放弃旧密码库：清空本账号条目密文并重置 vault key（不可恢复）。
   deleteVault: (t) => request('POST', '/api/vault/delete', undefined, t),
   // 旧数据迁移：取回服务端静态密钥加密条目的明文，供浏览器用 vault key 重新加密。
