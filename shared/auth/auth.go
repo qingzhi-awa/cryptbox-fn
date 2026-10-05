@@ -29,6 +29,26 @@ func CheckPassword(hash, pw string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
 }
 
+// dummyPasswordHash 是「登录失败路径」的恒定耗时比对目标（F4）。
+//
+// 用户不存在时若直接返回，会跳过 bcrypt 比对（成本 12 约 ~200ms），攻击者仅凭
+// 响应时间即可枚举账号是否存在。对固定 dummy 哈希做一次同成本比对可抹平该差异。
+// 值在包初始化时按当前成本生成一次；其明文内容无意义。
+var dummyPasswordHash = func() string {
+	h, err := bcrypt.GenerateFromPassword([]byte("cryptbox-dummy-verifier"), bcryptCost)
+	if err != nil {
+		// 实际上不会失败；兜底为一个合法的 bcrypt 串，保证比对仍消耗时间。
+		return "$2a$12$eImiTXuWVxfM37uY4JANjQ=="
+	}
+	return string(h)
+}()
+
+// DummyPasswordCheck 对固定哈希做一次 bcrypt 比对，仅为消耗与真实校验相当的时间，
+// 用于登录失败路径抵御账号枚举计时侧信道（F4）。返回值无意义，调用方应忽略。
+func DummyPasswordCheck(pw string) {
+	_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(pw))
+}
+
 // Claims JWT 载荷。
 //
 // TokenVer 为「令牌版本」（PT-06）：与 users.token_version 比对，不一致即视为失效。

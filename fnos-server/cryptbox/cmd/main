@@ -1,7 +1,15 @@
 #!/bin/bash
 
+# F6：收紧本脚本创建文件的默认权限。info.log 会记录服务端运行日志（含 SMTP 失败
+# 细节等），默认 umask 下以 0644 创建会被同机其他用户读取，故统一按 0077 创建。
+umask 077
+
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+# 日志文件首次创建即 0600；已存在（旧版本以 0644 创建）时兜底收紧。touch 不截断已存在文件。
+touch "${LOG_FILE}" 2>/dev/null
+chmod 600 "${LOG_FILE}" 2>/dev/null
 
 # 根据系统架构选择二进制（amd64 / arm64）
 ARCH=$(uname -m)

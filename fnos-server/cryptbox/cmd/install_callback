@@ -3,6 +3,11 @@
 ### This script is called after the user installs the application.
 ### 把安装向导里设置的管理员账号与 SMTP 配置写入初始化文件，供服务端启动时初始化。
 
+# F6：setup.conf / smtp.conf 含**明文管理员口令与 SMTP 授权码**。默认 umask 下
+# `printf > file` 会先以 0644 创建、再 chmod 600，两者之间存在可被同机其他用户
+# 读取的窗口。这里把 umask 置于最前，使文件从创建瞬间即为 0600（后续 chmod 仅作兜底）。
+umask 077
+
 mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
 
 # 让重置密码脚本可执行（位于 target 目录，供管理员 SSH 登录后直接运行）

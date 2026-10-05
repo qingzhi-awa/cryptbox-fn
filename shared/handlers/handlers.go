@@ -685,9 +685,16 @@ func (s *Server) handleRegister(c *gin.Context) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Username == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空"})
+		return
+	}
+	// 保留名校验（F3）：公开注册同样不得占用 admin/root/superadmin/system。
+	// 否则任一访客可注册普通账号 "admin"，在界面/审计日志上冒充管理员，
+	// 破坏「用户名 ≠ 角色」的纵深防御（其余三条建号路径均已校验）。
+	if isReservedUsername(req.Username) {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "该用户名为系统保留名，不可使用"})
 		return
 	}
 	if !auth.AllowRegistration(s.DB) {
@@ -719,10 +726,10 @@ func (s *Server) handleRegister(c *gin.Context) {
 		writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
 		return
 	}
-	// 邮箱唯一性（R7-01）：该邮箱已被占用则拒绝注册。
+	// 邮箱唯一性（R7-01，F5）：按归一（小写）比较，避免大小写变体绕过唯一锚点。
 	// 此处调用方已通过邮箱验证码证明了对该邮箱的控制权，故直接提示不构成邮箱枚举泄露。
 	var emailUsed int
-	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, req.Email).Scan(&emailUsed); err != nil {
+	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ?`, req.Email).Scan(&emailUsed); err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -790,16 +797,27 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// 改为"用户名精确匹配优先，未命中再按邮箱匹配"；邮箱已由唯一索引保证唯一。
 	err := s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE username = ?`, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
 	if err == sql.ErrNoRows {
-		err = s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE email = ?`, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
+		err = s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE lower(email) = lower(?)`, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
 	}
-	if err == sql.ErrNoRows || (err == nil && !auth.CheckPassword(hash, req.Password)) {
+	// 真正的 DB 错误单独处理，避免与"口令错误"混淆（也避免把连接故障记成登录失败）。
+	if err != nil && err != sql.ErrNoRows {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	// F4：账号不存在时**仍执行一次等价成本的 bcrypt 比对**（固定 dummy 哈希）。
+	//   · 存在账号 + 错口令：走真实 bcrypt（成本 12，~200ms）；
+	//   · 不存在账号：此前直接返回（~40ms），差约 5 倍 —— 稳定的账号枚举侧信道。
+	// 对 dummy 做一次同成本比对后两条路径耗时趋同，攻击者无法据时间区分。
+	passwordOK := false
+	if err == nil {
+		passwordOK = auth.CheckPassword(hash, req.Password)
+	} else {
+		auth.DummyPasswordCheck(req.Password)
+	}
+	if !passwordOK {
 		s.loginLock.Fail(lockKey)
 		log.LogAction(s.DB, 0, login, "login_failed", "登录失败", clientIP(c))
 		writeJSON(c, http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
-		return
-	}
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	if status != "active" {
@@ -1199,7 +1217,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Username == "" || len(req.Password) < 6 {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空，密码至少 6 位"})
 		return
@@ -1231,10 +1249,10 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
 		return
 	}
-	// 邮箱唯一性（R7-01）：管理员添加用户时的邮箱也不得与他人重复。
+	// 邮箱唯一性（R7-01，F5）：管理员添加用户时的邮箱也不得与他人重复（按归一比较）。
 	if req.Email != "" {
 		var emailUsed int
-		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, req.Email).Scan(&emailUsed); err != nil {
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ?`, req.Email).Scan(&emailUsed); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -1314,10 +1332,11 @@ func (s *Server) handleImportUsers(c *gin.Context) {
 			skipped++
 			continue
 		}
-		// 邮箱唯一性（R7-01）：邮箱已被占用（含本批先前导入的行）则该行跳过。
-		if em := strings.TrimSpace(u.Email); em != "" {
+		// 邮箱唯一性（R7-01，F5）：邮箱已被占用（含本批先前导入的行）则该行跳过；按归一比较。
+		em := auth.NormalizeEmail(u.Email)
+		if em != "" {
 			var emailUsed int
-			if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, em).Scan(&emailUsed); err != nil {
+			if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ?`, em).Scan(&emailUsed); err != nil {
 				writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 				return
 			}
@@ -1331,7 +1350,7 @@ func (s *Server) handleImportUsers(c *gin.Context) {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 			return
 		}
-		if _, err := db.CreateUserWithNextID(s.DB, username, hash, role, strings.TrimSpace(u.Email), "", ""); err != nil {
+		if _, err := db.CreateUserWithNextID(s.DB, username, hash, role, em, "", ""); err != nil {
 			// 批量导入时并发同名属"该行跳过"，不应中断整批导入。
 			if errors.Is(err, db.ErrUsernameTaken) {
 				skipped++
@@ -1495,7 +1514,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		}
 		status = req.Status
 	}
-	if username != target.Username {
+	usernameChanged := username != target.Username
+	if usernameChanged {
 		var exists int
 		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE username = ? AND id != ?`, username, id).Scan(&exists); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -1507,15 +1527,16 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		}
 	}
 	// 邮箱留空时保留原值，避免管理员误提交清空用户邮箱（导致其无法找回密码）。
-	email := strings.TrimSpace(req.Email)
+	// F5：非空邮箱归一为小写存储；与现值做大小写不敏感比较，避免"仅大小写不同"被当成变更。
+	email := auth.NormalizeEmail(req.Email)
 	if email == "" {
 		email = target.Email
 	}
-	// 邮箱唯一性（R7-01）：管理员改他人邮箱无需所有权验证码（管理员可管理该用户），
-	// 但必须避免与他人的邮箱重复。
-	if email != target.Email {
+	// 邮箱唯一性（R7-01，F5）：管理员改他人邮箱无需所有权验证码（管理员可管理该用户），
+	// 但必须避免与他人的邮箱重复（按归一比较，防止大小写变体绕过）。
+	if !strings.EqualFold(email, target.Email) {
 		var emailUsed int
-		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, email, id).Scan(&emailUsed); err != nil {
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ? AND id != ?`, email, id).Scan(&emailUsed); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -1546,6 +1567,12 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 			return
 		}
 	}
+	// 改名后该用户此前签发的令牌立即失效（F1/F2）：令牌里带的是旧用户名，
+	// 若不吊销，改名者可用旧令牌经 PUT /api/me 把身份回写成旧名字（令牌当事实源）。
+	// 与改密同口径递增 token_version，使「被改名 = 需要重新登录」。
+	if usernameChanged {
+		_ = db.BumpTokenVersion(s.DB, id)
+	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "update_user", "修改用户 "+target.Username, clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
@@ -1561,7 +1588,7 @@ func (s *Server) handleSendMyEmailCode(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Email == "" || !strings.Contains(req.Email, "@") {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱格式不正确"})
 		return
@@ -1572,7 +1599,7 @@ func (s *Server) handleSendMyEmailCode(c *gin.Context) {
 	}
 	// 已被其他账号占用的邮箱直接拒绝：省去一次发信，也避免骚扰该邮箱的主人。
 	var used int
-	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
+	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -1610,12 +1637,20 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
+	// 账号身份一律以 **数据库现值** 为准，绝不从令牌声明回填（F2）：令牌内的 username
+	// 可能已过期（如管理员改名后，旧令牌仍在有效期内），把它写回库会把用户名静默
+	// 回滚为旧值；叠加 F1 的 ID 复用即可完成身份混淆/接管。DB 现值才是事实源。
+	var currentHash, currentEmail, currentUsername string
+	if err := s.DB.QueryRow(`SELECT password_hash, COALESCE(email, ''), COALESCE(username, '') FROM users WHERE id = ?`, claims.UserID).Scan(&currentHash, &currentEmail, &currentUsername); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
-		username = claims.Username
+		username = currentUsername
 	}
-	if username != claims.Username {
+	if username != currentUsername {
 		// 保留名校验：与 handleCreateUser / handleUpdateUser / handleImportUsers 保持一致，
 		// 避免用户经自助改名绕过"用户名即角色"的纵深防御。
 		if isReservedUsername(username) {
@@ -1636,15 +1671,10 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 	// 任何一项实际变更都要求当前密码。否则持有泄露令牌的攻击者可先改绑自己的
 	// 邮箱，再经「邮箱重置口令」闭环完成持久接管——改密会验证旧口令，唯独改
 	// 邮箱/用户名不验，防护不对称。
-	var currentHash, currentEmail string
-	if err := s.DB.QueryRow(`SELECT password_hash, COALESCE(email, '') FROM users WHERE id = ?`, claims.UserID).Scan(&currentHash, &currentEmail); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	usernameChanged := username != claims.Username
+	usernameChanged := username != currentUsername
 	// 邮箱留空表示"不修改"：仅当提交了非空且与当前值不同的邮箱时才算变更，
-	// 避免改密/改名请求未携带 email 时把邮箱误清空。
-	emailChanged := req.Email != "" && req.Email != currentEmail
+	// 避免改密/改名请求未携带 email 时把邮箱误清空。F5：按大小写不敏感比较。
+	emailChanged := req.Email != "" && !strings.EqualFold(req.Email, currentEmail)
 	effectiveEmail := currentEmail
 	if req.Email != "" {
 		effectiveEmail = req.Email
@@ -1689,7 +1719,7 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 			return
 		}
 		var used int
-		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE lower(email) = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -1758,9 +1788,10 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "update_me", detail, clientIP(c))
 	resp := gin.H{"status": "ok"}
-	// 改密后令牌版本已 +1，旧令牌即刻失效；这里为**当前会话**重新签发一个，
-	// 并把新令牌回给前端（同时刷新 Cookie），避免用户被自己登出。
-	if req.NewPassword != "" {
+	// 改密后令牌版本已 +1、改名后用户名已变，旧令牌都会即刻失效；这里为**当前会话**
+	// 重新签发一个（带新用户名），并把新令牌回给前端（同时刷新 Cookie），
+	// 避免用户改密码/改用户名后被自己登出。
+	if req.NewPassword != "" || usernameChanged {
 		if tok, err := auth.GenerateToken(s.Cfg.JWTSecret, claims.UserID, username, claims.Role, db.TokenVersion(s.DB, claims.UserID), gatewayIdentity(c)); err == nil {
 			setSessionCookie(c, tok)
 			resp["token"] = tok
@@ -1954,7 +1985,7 @@ func (s *Server) handleSendRegisterCode(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Email == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
@@ -1988,7 +2019,7 @@ func (s *Server) handleSendResetCode(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Email == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
@@ -1999,7 +2030,7 @@ func (s *Server) handleSendResetCode(c *gin.Context) {
 		return
 	}
 	var id int64
-	err := s.DB.QueryRow(`SELECT id FROM users WHERE email = ?`, req.Email).Scan(&id)
+	err := s.DB.QueryRow(`SELECT id FROM users WHERE lower(email) = ?`, req.Email).Scan(&id)
 	if err == nil {
 		// 仅在邮箱真实存在时发信；失败也不向调用方暴露差异。
 		_ = auth.SendVerifyCode(s.DB, s.EncKey, req.Email, "reset")
@@ -2019,7 +2050,7 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Email == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
@@ -2046,7 +2077,7 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 	// 先解析唯一目标账号，再按 id 定向更新（R7-01）：原 `UPDATE ... WHERE email = ?`
 	// 在邮箱非唯一时会对多个账号批量改密（跨账号串扰）。邮箱现已唯一，按 id 更新更明确。
 	var targetID int64
-	if err := s.DB.QueryRow(`SELECT id FROM users WHERE email = ?`, req.Email).Scan(&targetID); err != nil {
+	if err := s.DB.QueryRow(`SELECT id FROM users WHERE lower(email) = ?`, req.Email).Scan(&targetID); err != nil {
 		if err == sql.ErrNoRows {
 			writeJSON(c, http.StatusNotFound, gin.H{"error": "该邮箱未注册"})
 			return

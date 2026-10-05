@@ -419,6 +419,16 @@ func GenCode() (string, error) {
 	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
+// NormalizeEmail 将邮箱归一为「小写 + 去首尾空白」形式（F5）。
+//
+// 邮箱在使用上大小写不敏感：同一邮箱的大小写变体必须被视为同一账号锚点。
+// 服务端在写入口用本函数归一存储，查重 / 登录 / 验证码一律按归一后的值比较，
+// 避免 "A@x.com" 与 "a@x.com" 被当成两个账号（破坏 R7-01 建立的邮箱唯一锚点，
+// 连带破坏「邮箱登录 / 邮箱找回密码」的消歧基础）。
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // hashCode 计算验证码的存储摘要（按 email + purpose 加域隔离），避免明文入库。
 // 只需防「拖库后直接读取」这一场景，故使用带上下文的 SHA-256 而非慢哈希。
 func hashCode(email, purpose, code string) string {
@@ -435,6 +445,7 @@ func purgeExpiredVerifications(database *sql.DB) {
 // SaveVerification 保存邮箱验证码（15 分钟有效，expires_at 存 Unix 时间戳，摘要入库）。
 // 同一 email + purpose 只保留最新一条，并顺带清理过期记录。
 func SaveVerification(database *sql.DB, email, code, purpose string) error {
+	email = NormalizeEmail(email) // F5：验证码归属按归一后的邮箱记录/比对
 	purgeExpiredVerifications(database)
 	if _, err := database.Exec(`DELETE FROM email_verifications WHERE email = ? AND purpose = ?`, email, purpose); err != nil {
 		return err
@@ -451,6 +462,7 @@ func CheckVerification(database *sql.DB, email, code, purpose string) bool {
 	if code == "" {
 		return false
 	}
+	email = NormalizeEmail(email) // F5：与 SaveVerification 同口径，避免大小写不一致导致比对落空
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 	var (
 		id       int64

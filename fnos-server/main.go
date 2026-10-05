@@ -199,9 +199,21 @@ func main() {
 		}
 		// 网关 socket 仅授予属主/属组访问（0600/0660），避免同机任意用户直连。
 		_ = os.Chmod(cfg.SockPath, 0o660)
+		// F6：0660 使属组内任意进程都能连接，而 socket 入口信任 X-Forwarded-For ——
+		// 属组内进程可借此伪造来源 IP，绕过 IP 维度限流/锁定并污染审计来源。
+		// 配置 GATEWAY_UID 后，仅在 Linux 上按 SO_PEERCRED 校验对端 UID，把信任边界
+		// 从「整个属组」收紧到「网关进程本身」；未配置时维持现状并提示残余风险。
+		var sockServeLn net.Listener = sockLn
+		if uid, ok := gatewayUID(); ok {
+			sockServeLn = uidGateListener{Listener: sockLn, allowUID: uid}
+			log.Printf("统一网关 Socket 已启用对端凭据校验：仅接受 UID=%d 的连接", uid)
+		} else {
+			log.Printf("提示：网关 Socket 为 0660 且信任 X-Forwarded-For，属组内其他进程可伪造来源 IP；" +
+				"若网关以固定用户运行，可设置 GATEWAY_UID=<uid> 收紧为仅该用户可连接。")
+		}
 		log.Printf("统一网关 Socket 已监听: %s", cfg.SockPath)
 		go func() {
-			if err := http.Serve(sockLn, sockHandler); err != nil {
+			if err := http.Serve(sockServeLn, sockHandler); err != nil {
 				log.Fatalf("Socket 服务退出: %v", err)
 			}
 		}()
@@ -334,7 +346,8 @@ func setupAdminFromInstall(database *sql.DB, cfg config.Config) error {
 	password := lines[1] // 密码保留原样，不去空格
 	email := ""
 	if len(lines) >= 3 {
-		email = strings.TrimSpace(lines[2])
+		// F5：邮箱大小写归一，与其余写入口口径一致。
+		email = auth.NormalizeEmail(lines[2])
 	}
 	if username == "" || password == "" {
 		return nil

@@ -130,24 +130,33 @@ func Open(cfg config.Config) (*sql.DB, error) {
 // hardenDataFilePerm 在类 Unix 系统上把数据文件权限收紧为 0600。
 // 已是 0600 时不做任何操作；无法收紧时仅告警，不阻断启动。
 func hardenDataFilePerm(dsn string) {
-	if runtime.GOOS == "windows" || dsn == "" || strings.HasPrefix(dsn, ":memory:") {
+	if dsn == "" || strings.HasPrefix(dsn, ":memory:") {
 		return
 	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		path := dsn + suffix
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if info.Mode().Perm()&0o077 == 0 {
-			continue
-		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			log.Printf("[db] 警告：无法收紧数据文件权限 %s: %v", path, err)
-			continue
-		}
-		log.Printf("[db] 已将数据文件权限收紧为 0600: %s", path)
+		hardenFilePerm(dsn + suffix)
 	}
+}
+
+// hardenFilePerm 在类 Unix 系统上把单个文件权限收紧为 0600（F6）。
+// 文件不存在或已是 0600 时不做任何操作；无法收紧时仅告警，不阻断。
+// 用于主库、迁移备份等含账号哈希 / 解锁材料的敏感文件。
+func hardenFilePerm(path string) {
+	if runtime.GOOS == "windows" || path == "" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if info.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		log.Printf("[db] 警告：无法收紧文件权限 %s: %v", path, err)
+		return
+	}
+	log.Printf("[db] 已将文件权限收紧为 0600: %s", path)
 }
 
 // Migrate 建表并兼容旧库补列（不提供数据库文件路径，结构升级时跳过备份）。
@@ -368,12 +377,16 @@ func migrateSchema(db *sql.DB) error {
 	return nil
 }
 
-// ensureUniqueEmailIndex 为 users.email 建立部分唯一索引（非空时唯一）。
+// ensureUniqueEmailIndex 为 users.email 建立部分唯一索引（非空时唯一，大小写不敏感）。
 //
-// 若库中已存在重复的非空邮箱，会拒绝建索引并返回错误（列出重复值），
-// 交由管理员归并后再重启生效——避免"静默改写/删除"已有账号数据。
+// F5：邮箱在实际使用中大小写不敏感，唯一性必须建在 lower(email) 上，否则
+// "A@x.com" 与 "a@x.com" 会被 BINARY 排序视为不同值而并存，架空 R7-01 的邮箱唯一锚点。
+// 旧版本索引建在 email（BINARY）上，这里检测并重建为表达式索引。
+//
+// 若库中已存在重复的非空邮箱（按归一比较），会拒绝建索引并返回错误（列出重复值），
+// 交由管理员归并后再重启生效——避免"静默改写/删除"已有账号数据，也不阻塞启动。
 func ensureUniqueEmailIndex(db *sql.DB) error {
-	rows, err := db.Query(`SELECT email, COUNT(1) FROM users WHERE email <> '' GROUP BY email HAVING COUNT(1) > 1`)
+	rows, err := db.Query(`SELECT lower(email), COUNT(1) FROM users WHERE email <> '' GROUP BY lower(email) HAVING COUNT(1) > 1`)
 	if err != nil {
 		return err
 	}
@@ -391,7 +404,16 @@ func ensureUniqueEmailIndex(db *sql.DB) error {
 	if len(dups) > 0 {
 		return fmt.Errorf("存在 %d 个被多个账号占用的邮箱，请先归并：%s", len(dups), strings.Join(dups, ", "))
 	}
-	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email <> ''`)
+	// 旧索引（大小写敏感）与目标定义不符时丢弃重建。
+	var idxSQL string
+	if err := db.QueryRow(`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email_unique'`).Scan(&idxSQL); err == nil {
+		if idxSQL != "" && !strings.Contains(strings.ToLower(idxSQL), "lower(") {
+			if _, err := db.Exec(`DROP INDEX IF EXISTS idx_users_email_unique`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(lower(email)) WHERE email <> ''`)
 	return err
 }
 
@@ -580,6 +602,9 @@ func backupDatabase(db *sql.DB, path string) error {
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("升级前备份未生成（已中止迁移）：%w", err)
 	}
+	// F6：备份含全量账号哈希 / 解锁材料 / 配置，必须与主库同等收紧权限（VACUUM INTO
+	// 生成的文件继承进程 umask，通常为 0644，可被同机其他用户读取）。
+	hardenFilePerm(target)
 	pruneOldBackups(path, target)
 	return nil
 }
