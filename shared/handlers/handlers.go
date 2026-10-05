@@ -468,6 +468,20 @@ func clearSessionCookie(c *gin.Context) {
 	})
 }
 
+// tokenIssuedForAccount 判断令牌的签发时间是否不早于账号创建时间（F1）。
+//
+// 背景：users.id 在删号后会被回收复用。若被删账号的旧令牌落到「复用了同一 id 的
+// 新账号」上，仅靠 token_version 无法区分（新账号默认 0，与旧令牌 ver:0 相同）。
+// 账号创建时间是单调递增的事实：任何人都不可能持有一个「早于账号创建」签发的令牌。
+// createdAt 为 SQLite CURRENT_TIMESTAMP 的 UTC 文本（YYYY-MM-DD HH:MM:SS），
+// 令牌 IssuedAt 同为 UTC 秒级，故可直接按字典序比较。created_at 缺失时放行（兼容老库）。
+func tokenIssuedForAccount(createdAt string, claims *auth.Claims) bool {
+	if createdAt == "" || claims.IssuedAt == nil {
+		return true
+	}
+	return claims.IssuedAt.Time.UTC().Format("2006-01-02 15:04:05") >= createdAt
+}
+
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 仅认自定义账号密码签发的 JWT（不使用飞牛网关 X-Trim 头做身份认证），
@@ -476,11 +490,14 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			if claims, err := auth.ParseToken(s.Cfg.JWTSecret, tok); err == nil {
 				// 每请求回查角色、状态与令牌版本：
 				//   · status != active → 停用即时生效；
-				//   · token_version 不匹配 → 改密码后旧令牌立即失效（PT-06）。
-				var role, status string
+				//   · token_version 不匹配 → 改密码后旧令牌立即失效（PT-06）；
+				//   · username 不匹配 → 改名/身份被替换后旧令牌立即失效（F1）；
+				//   · 令牌签发时间早于账号创建时间 → 拒绝（F1）。
+				var role, status, username, createdAt string
 				var tokenVer int64
-				if err := s.DB.QueryRow(`SELECT role, status, COALESCE(token_version, 0) FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status, &tokenVer); err == nil &&
-					status == "active" && tokenVer == claims.TokenVer {
+				if err := s.DB.QueryRow(`SELECT role, status, COALESCE(token_version, 0), COALESCE(username, ''), COALESCE(created_at, '') FROM users WHERE id = ?`, claims.UserID).Scan(&role, &status, &tokenVer, &username, &createdAt); err == nil &&
+					status == "active" && tokenVer == claims.TokenVer &&
+					username == claims.Username && tokenIssuedForAccount(createdAt, claims) {
 					// 飞牛账号隔离：经统一网关访问时，会话必须与签发它的飞牛账号一致。
 					// 切换飞牛账号后，浏览器里残留的 Cookie/sessionStorage 仍带着上一个
 					// 飞牛账号签发的令牌，此处按 FnUID 不一致直接拒绝并清除 Cookie，
