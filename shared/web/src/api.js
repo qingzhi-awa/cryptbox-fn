@@ -126,6 +126,8 @@ export default {
   publicSettings: () => request('GET', '/api/settings/public'),
   me: (t) => request('GET', '/api/me', undefined, t),
   updateMe: (data, t) => request('POST', '/api/me/update', data, t),
+  // 自助改绑邮箱：向新邮箱发送所有权验证码（R7-01）。管理员改他人邮箱不需要验证码。
+  sendMyEmailCode: (data, t) => request('POST', '/api/me/email-code', data, t),
   uploadAvatar: (data, t) => request('POST', '/api/me/avatar', data, t),
   // 密码条目：端到端加密，统一走 Vault 协议（整库上传/下载），服务端不透明存储。
   // 写操作一律使用 POST 入口：飞牛统一网关只转发 GET/POST，PUT/DELETE 会被网关自身
@@ -137,7 +139,11 @@ export default {
   deleteVault: (t) => request('POST', '/api/vault/delete', undefined, t),
   // 旧数据迁移：取回服务端静态密钥加密条目的明文，供浏览器用 vault key 重新加密。
   getLegacy: (t) => request('GET', '/api/vault/legacy', undefined, t),
+  // 迁移完成上报：服务端落标记后永久关闭 legacy 明文接口（此后返回 410）。
+  markLegacyDone: (t) => request('POST', '/api/vault/legacy/done', undefined, t),
   listUsers: (t) => request('GET', '/api/users', undefined, t),
+  // 过渡期提示：仍存在服务端可解密旧数据（未迁移）的账号清单。
+  legacyPending: (t) => request('GET', '/api/legacy-pending', undefined, t),
   createUser: (u, t) => request('POST', '/api/users', u, t),
   importUsers: (csv, t) => request('POST', '/api/users/import', { csv }, t),
   deleteUser: (id, t) => request('POST', '/api/users/delete?id=' + id, undefined, t),

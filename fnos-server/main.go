@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -53,16 +54,11 @@ func main() {
 
 	// CLI 模式：发送测试邮件验证 SMTP 配置后退出（供安装向导校验 SMTP）。
 	if len(os.Args) > 1 && os.Args[1] == "-test-smtp" {
-		if len(os.Args) < 8 {
-			log.Fatalf("用法: %s -test-smtp <host> <port> <username> <password> <ssl> <to>", os.Args[0])
+		if len(os.Args) < 7 {
+			log.Fatalf("用法: %s -test-smtp <host> <port> <username> <ssl> <to>（口令从标准输入读取）", os.Args[0])
 		}
-		host := os.Args[2]
-		port, _ := strconv.Atoi(os.Args[3])
-		username := os.Args[4]
-		password := os.Args[5]
-		ssl := os.Args[6] == "true"
-		to := os.Args[7]
-		if err := auth.TestSMTP(host, port, username, password, ssl, to); err != nil {
+		// R8-05：口令不走命令行参数，与 -reset-admin 一致改为从标准输入读取。
+		if err := runTestSMTP(os.Args[2:], os.Stdin); err != nil {
 			log.Fatalf("测试邮件发送失败: %v", err)
 		}
 		log.Println("测试邮件已发送")
@@ -80,24 +76,27 @@ func main() {
 	}
 	defer database.Close()
 
+	// 密钥治理（PT-07）：静态加密密钥与 JWT 签名密钥存放在数据目录下的独立
+	// 文件（0600），不再与业务数据同放数据库；首次启动自动从 meta 迁移。
+	// 加密密钥提前创建，供 SMTP 口令在写入口即时加密（R7-02）。
+	encKey, err := crypto.GetOrCreateEncryptionKey(database, config.DataDir())
+	if err != nil {
+		log.Fatalf("初始化加密密钥失败: %v", err)
+	}
+
 	// 首次安装时，从安装向导写入的初始化文件创建超级管理员与 SMTP 配置。
 	if err := setupAdminFromInstall(database, cfg); err != nil {
 		log.Fatalf("初始化管理员失败: %v", err)
 	}
-	if err := setupSMTPFromInstall(database, cfg); err != nil {
+	// SMTP 口令在写入口即时加密落库（R7-02），不再依赖后续迁移兜底。
+	if err := setupSMTPFromInstall(database, cfg, encKey); err != nil {
 		log.Fatalf("初始化 SMTP 配置失败: %v", err)
 	}
 	if err := setupLanguageFromInstall(database, cfg); err != nil {
 		log.Fatalf("初始化默认语言失败: %v", err)
 	}
 
-	// 密钥治理（PT-07）：静态加密密钥与 JWT 签名密钥存放在数据目录下的独立
-	// 文件（0600），不再与业务数据同放数据库；首次启动自动从 meta 迁移。
-	encKey, err := crypto.GetOrCreateEncryptionKey(database, config.DataDir())
-	if err != nil {
-		log.Fatalf("初始化加密密钥失败: %v", err)
-	}
-	// 历史明文 SMTP 口令升级为密文存储（幂等）。
+	// 历史明文 SMTP 口令升级为密文存储（幂等，兼容旧库）。
 	if err := auth.MigrateSMTPPassword(database, encKey); err != nil {
 		log.Printf("警告：SMTP 口令加密迁移失败（可稍后重试）: %v", err)
 	}
@@ -112,7 +111,8 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
-	// 仅在显式配置 TRUST_PROXY=true 时采信 X-Forwarded-For，防止来源 IP 被伪造。
+	// 进程级 XFF 开关仅作未标注入口的兜底；下方 TCP / Socket 监听均按入口
+	// 显式标注信任决策（XFFTrustMiddleware），优先级高于此开关。
 	auditlog.TrustProxyHeaders = cfg.TrustProxy
 
 	// TLS 决策链（默认 HTTPS）：
@@ -151,6 +151,12 @@ func main() {
 
 	handler := web.Serve(r)
 
+	// XFF 信任按入口区分：统一网关 Unix Socket 的 X-Forwarded-For 由网关注入、
+	// 可信；直连 TCP 端口的 XFF 可能是客户端伪造，一律不采信。
+	// 两者均覆盖 TRUST_PROXY 进程级开关，防止直连请求伪造来源 IP 绕过 IP 限流。
+	sockHandler := auditlog.XFFTrustMiddleware(handler, true)
+	tcpHandler := auditlog.XFFTrustMiddleware(handler, false)
+
 	// TCP 监听：客户端局域网同步与飞牛端 Web 访问共用。认证统一走登录页 JWT，不使用网关头。
 	tcpLn, err := net.Listen("tcp", ":"+cfg.Port)
 	if err != nil {
@@ -160,16 +166,16 @@ func main() {
 		// 同端口双协议：浏览器走 HTTPS（加密 + HSTS），
 		// fnOS 的端口健康检查（checkport）与统一网关转发的明文 HTTP 保持兼容；
 		// FORCE_HTTPS 时外部明文请求 301 到 HTTPS（本机转发豁免）。
-		plain := http.Handler(handler)
+		plain := http.Handler(tcpHandler)
 		if cfg.ForceHTTPS {
-			plain = tlsutil.ForceHTTPSRedirect(handler, cfg.Port)
+			plain = tlsutil.ForceHTTPSRedirect(tcpHandler, cfg.Port)
 		}
 		log.Printf("密匣服务已启动: https://localhost:%s（同端口兼容 HTTP 明文探测/转发）", cfg.Port)
 		if cfg.HTTPRedirectPort != "" {
 			startHTTPRedirect(cfg.HTTPRedirectPort, cfg.Port)
 		}
 		go func() {
-			if err := tlsutil.ServeDual(tcpLn, cfg.TLSCert, cfg.TLSKey, plain, handler); err != nil {
+			if err := tlsutil.ServeDual(tcpLn, cfg.TLSCert, cfg.TLSKey, plain, tcpHandler); err != nil {
 				log.Fatalf("TCP 服务退出: %v", err)
 			}
 		}()
@@ -178,7 +184,7 @@ func main() {
 		log.Printf("安全提示：未配置 TLS_CERT / TLS_KEY，局域网同步走明文 HTTP，登录口令与令牌可被嗅探；" +
 			"建议配置证书后重启。")
 		go func() {
-			if err := http.Serve(tcpLn, handler); err != nil {
+			if err := http.Serve(tcpLn, tcpHandler); err != nil {
 				log.Fatalf("TCP 服务退出: %v", err)
 			}
 		}()
@@ -195,7 +201,7 @@ func main() {
 		_ = os.Chmod(cfg.SockPath, 0o660)
 		log.Printf("统一网关 Socket 已监听: %s", cfg.SockPath)
 		go func() {
-			if err := http.Serve(sockLn, handler); err != nil {
+			if err := http.Serve(sockLn, sockHandler); err != nil {
 				log.Fatalf("Socket 服务退出: %v", err)
 			}
 		}()
@@ -206,6 +212,28 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("收到退出信号，正在关闭...")
+}
+
+// runTestSMTP 执行 -test-smtp 子命令：host/port/username/ssl/to 依次取自 args
+// （即 os.Args[2:]），SMTP 口令从 stdin 读取一行。
+//
+// 口令刻意不经命令行参数：argv 对同机所有本地用户可见（ps / /proc/<pid>/cmdline），
+// 而 SMTP 授权码常与邮箱主口令相同，泄露会外溢到邮箱本体（R8-05）。
+func runTestSMTP(args []string, stdin io.Reader) error {
+	if len(args) < 5 {
+		return fmt.Errorf("参数不足：需要 <host> <port> <username> <ssl> <to>")
+	}
+	host := args[0]
+	port, err := strconv.Atoi(args[1])
+	if err != nil {
+		return fmt.Errorf("非法端口 %q: %w", args[1], err)
+	}
+	username := args[2]
+	ssl := args[3] == "true"
+	to := args[4]
+	line, _ := bufio.NewReader(stdin).ReadString('\n')
+	password := strings.TrimRight(line, "\r\n")
+	return auth.TestSMTP(host, port, username, password, ssl, to)
 }
 
 // startHTTPRedirect 在明文端口上把所有 HTTP 请求 301 到 HTTPS。
@@ -321,7 +349,8 @@ func setupAdminFromInstall(database *sql.DB, cfg config.Config) error {
 
 // setupSMTPFromInstall 读取安装向导写入的 SMTP 配置（5 行：host/port/username/password/ssl），
 // 若 host 非空则写入 meta。文件不存在时静默跳过，以兼容跳过 SMTP 或非向导安装场景。
-func setupSMTPFromInstall(database *sql.DB, cfg config.Config) error {
+// 口令在写入口即用服务端静态密钥加密（R7-02），避免明文落库窗口。
+func setupSMTPFromInstall(database *sql.DB, cfg config.Config, encKey []byte) error {
 	path := filepath.Join(filepath.Dir(cfg.DBDSN), "smtp.conf")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -366,7 +395,13 @@ func setupSMTPFromInstall(database *sql.DB, cfg config.Config) error {
 		return err
 	}
 	if password != "" {
-		if err := db.SetMeta(database, "smtp_password", password); err != nil {
+		// 写入口即时加密（R7-02）：不再先落明文、依赖后续 MigrateSMTPPassword 兜底，
+		// 消除"明文已落库、尚未加密"的窗口。EncryptSMTPPassword 幂等，随后再跑迁移也不会双重加密。
+		enc, err := auth.EncryptSMTPPassword(encKey, password)
+		if err != nil {
+			return err
+		}
+		if err := db.SetMeta(database, "smtp_password", enc); err != nil {
 			return err
 		}
 	}

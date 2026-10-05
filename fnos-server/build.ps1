@@ -1,4 +1,4 @@
-﻿# CryPtBox fnOS server packaging script
+# CryPtBox fnOS server packaging script
 # Usage: run .\build.ps1 in PowerShell
 # Output:
 #   中文版: fnos-cryptbox-x86-<version>.fpk / fnos-cryptbox-arm-<version>.fpk

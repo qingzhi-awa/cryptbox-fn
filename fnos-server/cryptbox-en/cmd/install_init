@@ -24,7 +24,10 @@ if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
         BIN="${TRIM_APPDEST}/cryptbox-server"
         [ -x "${BIN}" ] || BIN="${TRIM_APPDEST}/cryptbox-server-arm64"
         if [ -x "${BIN}" ]; then
-            if ! "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${wizard_smtp_password:-}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
+            # R8-05: pass the SMTP password via stdin, not as a command-line argument
+            # (avoids exposure to other local users via ps / /proc/<pid>/cmdline).
+            if ! printf '%s\n' "${wizard_smtp_password:-}" \
+                | "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
                 echo "Failed to send test email. Please go back and check the SMTP settings." >&2
                 exit 1
             fi

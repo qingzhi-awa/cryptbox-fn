@@ -24,6 +24,7 @@ export default {
     save: 'Enregistrer'
   },
   users: {
+    legacyPending: '{n} compte(s) contiennent encore d’anciennes données déchiffrables par le serveur (migration incomplète). Terminez la migration avant la version {v}.',
     add: 'Ajouter un utilisateur',
     username: "Nom d'utilisateur",
     email: 'E-mail',
@@ -47,6 +48,12 @@ export default {
     currentPassword: 'Mot de passe actuel',
     newPassword: 'Nouveau mot de passe',
     changeAvatar: "Changer d'avatar",
+    emailCode: 'Code de vérification de l\'e-mail',
+    emailCodeRequired: 'Veuillez demander et saisir le code envoyé au nouvel e-mail',
+    currentPasswordRequired: 'Veuillez saisir votre mot de passe actuel',
+    sendCode: 'Envoyer le code',
+    sending: 'Envoi…',
+    codeSent: 'Code envoyé, veuillez vérifier votre boîte de réception',
     edit: 'Modifier le profil'
   },
   msg: {

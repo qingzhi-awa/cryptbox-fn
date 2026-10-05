@@ -80,10 +80,15 @@ func GenerateToken(secret string, userID int64, username, role string, tokenVer 
 }
 
 // ParseToken 解析并校验 JWT。
+//
+// 安全要点（算法固定）：显式限定只接受 HS256。签发端只使用 HS256（见 GenerateToken），
+// 因此解析端也必须把期望算法写死——否则库会按令牌**自称**的 alg 选择校验算法。
+// golang-jwt/v5 默认已拒绝 alg=none，但"不限定算法"仍是纵深防御上的缺口：
+// 一旦将来引入非对称密钥（RS/ES），没有算法固定就可能被诱导走错误的校验分支。
 func ParseToken(secret, tokenStr string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil {
 		return nil, err
 	}
@@ -95,12 +100,18 @@ func ParseToken(secret, tokenStr string) (*Claims, error) {
 }
 
 // CanManageUser 判断 operatorRole 是否有权管理 targetRole。
+//
+// 等级隔离（R8-01）：admin 只能管理普通用户。原实现允许 admin 管理 admin，
+// 使同级管理员可互改口令并登录接管对方账号——改密会顺带递增 token_version，
+// 把对方所有会话踢下线，正好为接管清场；随后还能改绑对方邮箱（管理员路径免验证码）
+// 与 DELETE /api/vault 清空其密码库，属横向越权。
+// superadmin 不受此限，可管理包含 admin 在内的所有账号。
 func CanManageUser(operatorRole, targetRole string) bool {
 	if operatorRole == "superadmin" {
 		return true
 	}
 	if operatorRole == "admin" {
-		return targetRole == "user" || targetRole == "admin"
+		return targetRole == "user"
 	}
 	return false
 }

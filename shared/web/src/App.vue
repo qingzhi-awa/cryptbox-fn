@@ -266,6 +266,10 @@
           <input ref="userFileInput" type="file" accept=".csv,text/csv" style="display:none" @change="importUsersFile" />
         </div>
       </div>
+      <!-- 过渡期提示：仍有账号存在服务端可解密旧数据（未完成端到端迁移） -->
+      <div v-if="legacyPending.length" class="notice-warn">
+        {{ $t('users.legacyPending', { n: legacyPending.length, v: legacyRemoveVersion }) }}
+      </div>
       <div class="list">
         <div v-for="u in users" :key="u.id" class="row">
           <img v-if="u.avatar" :src="avatarUrl(u.id)" class="avatar" alt="" />
@@ -530,7 +534,7 @@
         <label>{{ $t('users.role') }}</label>
         <select v-model="userForm.role">
           <option value="user">{{ $t('users.roleUser') }}</option>
-          <option value="admin">{{ $t('users.roleAdmin') }}</option>
+          <option v-if="role === 'superadmin'" value="admin">{{ $t('users.roleAdmin') }}</option>
         </select>
         <label>{{ $t('users.active') }}</label>
         <select v-model="userForm.status">
@@ -557,7 +561,7 @@
         <label>{{ $t('users.role') }}</label>
         <select v-model="newUser.role">
           <option value="user">{{ $t('users.roleUser') }}</option>
-          <option value="admin">{{ $t('users.roleAdmin') }}</option>
+          <option v-if="role === 'superadmin'" value="admin">{{ $t('users.roleAdmin') }}</option>
         </select>
         <p v-if="userError" class="error">{{ userError }}</p>
         <div class="modal-actions">
@@ -581,6 +585,16 @@
         <input v-model="meForm.username" />
         <label>{{ $t('me.email') }}</label>
         <input v-model="meForm.email" />
+        <!-- 改邮箱需邮箱所有权验证码：仅在邮箱实际变更时出现（R7-01） -->
+        <template v-if="meEmailChanged">
+          <label>{{ $t('me.emailCode') }}</label>
+          <div class="code-row">
+            <input v-model="meForm.email_code" :placeholder="$t('me.emailCode')" />
+            <button class="btn-ghost" :disabled="emailCodeSending" @click="sendMyEmailCode">
+              {{ emailCodeSending ? $t('me.sending') : $t('me.sendCode') }}
+            </button>
+          </div>
+        </template>
         <label>{{ $t('me.currentPassword') }}</label>
         <input v-model="meForm.current_password" type="password" />
         <label>{{ $t('me.newPassword') }}</label>
@@ -629,7 +643,9 @@ export default {
   data() {
     return {
       logoUrl,
-      token: sessionStorage.getItem('token') || '',
+      // R8-07：JWT 仅存内存，不落 sessionStorage（否则削弱服务端 HttpOnly Cookie 的
+      // XSS 缓解）。刷新后由服务端下发的 HttpOnly 会话 Cookie 续期（见 trySession）。
+      token: '',
       sessionAuth: false,
       username: sessionStorage.getItem('username') || '',
       role: sessionStorage.getItem('role') || '',
@@ -643,6 +659,8 @@ export default {
       recoverForm: { oldPassword: '' },
       // 更新日志（关于页展示；与当前版本相同的条目会高亮）。
       changelog: [
+        { v: '0.2.36', items: ['收紧管理员权限：仅超级管理员可创建管理员或授予管理员角色，封堵「造号提权」旁路', '会话 Cookie 的 Secure 按反代/网关后的真实协议判定，直连 TLS 与受信代理均正确', '新增管理接口列出仍存在服务端可解密历史条目的账号，明文迁移接口计划 0.3.0 移除', '网页后台内容安全策略移除 unsafe-eval，消除脚本注入时的代码执行面', '修复初始化接口限流计数器未纳入定期清理导致的键表增长'] },
+        { v: '0.2.35', items: ['修复验证码与重置邮件发送失败（主题编码/补齐邮件头/正文编码/连接超时）', '邮箱唯一化：注册、建号、导入与改绑均校验占用，登录与重置不再受同邮箱多账号干扰', '用户自助改绑邮箱需通过新邮箱验证码，管理员后台调整无需验证码', '收紧管理员权限：仅能管理普通用户，不能再操作同级管理员', '登录失败锁定加入来源维度，避免被恶意锁定他人账号', '网页端登录令牌仅存内存，刷新免登录依赖服务端安全 Cookie'] },
         { v: '0.2.34', items: ['新增账号级「置顶参与同步」开关，桌面端与网页端均可修改', '开启后置顶状态随密码库同步到所有设备；关闭时各端独立保存'] },
         { v: '0.2.33', items: ['网页端条目支持置顶与拖拽排序', '置顶偏好按账号保存在服务端，与桌面端按设备置顶互不影响', '排序调整会随同步传播到桌面端'] },
         { v: '0.2.32', items: ['桌面端条目支持置顶与拖拽排序', '网址与用户名栏改为掩码显示，与密码一致', '移除桌面端渲染层多余的对话框权限'] },
@@ -703,6 +721,8 @@ export default {
       recycleEnabled: true,
       portAuto: true,
       settingsSecureMode: 'ssl',
+      // 自助改绑邮箱：验证码发送中状态（按钮防重复点击）。
+      emailCodeSending: false,
       entries: [],
       trash: [],
       search: '',
@@ -714,6 +734,9 @@ export default {
       form: this.emptyForm(),
       formShow: false,
       users: [],
+      // 仍存在服务端可解密旧数据（未迁移）的账号清单，及其计划移除版本。
+      legacyPending: [],
+      legacyRemoveVersion: '',
       newUser: { username: '', email: '', password: '', role: 'user' },
       showAddUser: false,
       editingUser: null,
@@ -721,7 +744,7 @@ export default {
       showMe: false,
       confirmBox: null,
       menuOpen: false,
-      meForm: { username: '', email: '', current_password: '', new_password: '' },
+      meForm: { username: '', email: '', email_code: '', current_password: '', new_password: '' },
       importFormat: '',
       ioFormat: '',
       lang: localStorage.getItem('locale') || 'zh-CN',
@@ -751,6 +774,10 @@ export default {
     },
     isAdmin() {
       return this.role === 'admin' || this.role === 'superadmin'
+    },
+    // 「我的账号」中邮箱是否被改动：决定是否展示验证码输入与发送按钮。
+    meEmailChanged() {
+      return (this.meForm.email || '').trim() !== (this.meEmail || '').trim()
     },
     gateTitle() {
       if (this.gateMode === 'setup') return this.$t('login.setupTitle')
@@ -789,6 +816,12 @@ export default {
     }
   },
   async mounted() {
+    // R8-07：清理历史版本可能残留在 sessionStorage 的令牌副本。
+    try {
+      sessionStorage.removeItem('token')
+    } catch (e) {
+      /* ignore */
+    }
     this.loadPublicSettings()
     try {
       const st = await api.status()
@@ -1020,7 +1053,7 @@ export default {
       this.role = r.role
       this.vaultKeyEnc = r.vault_key_enc || ''
       this.kdfSalt = r.kdf_salt || ''
-      sessionStorage.setItem('token', r.token)
+      // R8-07：令牌仅存内存；username/role 为非凭据字段，可持久化以优化首屏。
       sessionStorage.setItem('username', r.username)
       sessionStorage.setItem('role', r.role)
     },
@@ -1194,6 +1227,7 @@ export default {
       this.msg = ''
       if (t === 'logs') this.loadLogs()
       if (t === 'settings') this.loadSettings()
+      if (t === 'users' && this.isAdmin) this.loadUsers()
     },
     // 拉取整库并本地解密：password / notes 为密文，其余字段为明文元数据。
     // 同时取回网页端置顶偏好（失败不阻塞使用，仅退化为不置顶）。
@@ -1297,6 +1331,7 @@ export default {
       return this.allEntries.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1
     },
     // 旧数据迁移：服务端历史上用静态密钥加密的条目，取回明文后用 vault key 重新加密。
+    // 迁移成功后上报服务端落"已完成"标记，永久关闭 legacy 明文接口（一次性后门）。
     async migrateLegacy() {
       try {
         const r = await api.getLegacy(this.token)
@@ -1321,6 +1356,12 @@ export default {
           })
         }
         await api.putVault(out, this.token)
+        // 明文已全部重新加密上传 → 上报标记，服务端此后对 legacy 接口返回 410。
+        try {
+          await api.markLegacyDone(this.token)
+        } catch (e2) {
+          /* 标记失败不影响本次迁移，下次解锁会重试 */
+        }
         this.msg = this.$t('msg.migrated', { n: legacy.length })
       } catch (e) {
         /* 迁移失败不阻塞使用，下次解锁会重试 */
@@ -1364,6 +1405,14 @@ export default {
     async loadUsers() {
       const r = await api.listUsers(this.token)
       this.users = r.users || []
+      // 顺带拉取"未迁移账号"提示；失败不阻塞用户列表展示。
+      try {
+        const p = await api.legacyPending(this.token)
+        this.legacyPending = p.users || []
+        this.legacyRemoveVersion = p.remove_version || ''
+      } catch (e) {
+        this.legacyPending = []
+      }
     },
     async loadLogs() {
       try {
@@ -1818,12 +1867,31 @@ export default {
     canManageUser(u) {
       if (u.id === this.myId) return false
       if (this.role === 'superadmin') return true
-      if (this.role === 'admin') return u.role !== 'superadmin'
+      // 与后端 CanManageUser 对齐（R8-01）：admin 只能管理普通用户，不能操作同级/上级管理员。
+      if (this.role === 'admin') return u.role === 'user'
       return false
     },
     openMe() {
-      this.meForm = { username: this.username, email: this.meEmail, current_password: '', new_password: '' }
+      this.meForm = { username: this.username, email: this.meEmail, email_code: '', current_password: '', new_password: '' }
       this.showMe = true
+    },
+    // 自助改绑邮箱：向新邮箱发送所有权验证码（管理员改他人邮箱不需要验证码）。
+    async sendMyEmailCode() {
+      const email = (this.meForm.email || '').trim()
+      if (!email) {
+        this.error = this.$t('login.emailRequired')
+        return
+      }
+      this.emailCodeSending = true
+      this.error = ''
+      try {
+        await api.sendMyEmailCode({ email }, this.token)
+        this.msg = this.$t('me.codeSent')
+      } catch (e) {
+        this.error = String(e.message || e)
+      } finally {
+        this.emailCodeSending = false
+      }
     },
     triggerAvatar() {
       this.$refs.avatarInput.click()
@@ -1852,6 +1920,17 @@ export default {
     },
     async saveMe() {
       try {
+        // 改绑邮箱须先完成新邮箱验证码校验（R7-01），并填写当前密码。
+        if (this.meEmailChanged) {
+          if (!(this.meForm.email_code || '').trim()) {
+            this.error = this.$t('me.emailCodeRequired')
+            return
+          }
+          if (!this.meForm.current_password) {
+            this.error = this.$t('me.currentPasswordRequired')
+            return
+          }
+        }
         // 主密钥由账号密码 + 派生盐得出：密码变更（或老账号的用户名变更）后，
         // 必须用新的 master key 重新包裹 vault key，且与密码变更在同一请求内提交。
         // 若当前未解锁，本页无法重新包裹 —— 此时必须拒绝操作，否则旧密文将永久无法解密。
@@ -1882,8 +1961,9 @@ export default {
         // 改密后服务端递增令牌版本（旧令牌立即失效）并为当前会话重新签发，
         // 这里必须先换用新令牌，否则后续请求会 401。
         if (upd && upd.token) {
+          // 令牌仅更新内存副本；服务端已在响应中下发新的 HttpOnly 会话 Cookie（R8-07），
+          // 刷新后由该 Cookie 续期。
           this.token = upd.token
-          sessionStorage.setItem('token', upd.token)
         }
         if (this.meForm.vault_key_enc) {
           this.vaultKeyEnc = this.meForm.vault_key_enc
@@ -1891,6 +1971,7 @@ export default {
         }
         this.meForm.current_password = ''
         this.meForm.new_password = ''
+        this.meForm.email_code = ''
         this.meForm.kdf_salt = ''
         this.meForm.vault_key_enc = ''
         this.showMe = false
@@ -1907,7 +1988,10 @@ export default {
       }
     },
     startEditUser(u) {
-      this.userForm = { username: u.username, email: u.email || '', password: '', role: u.role, status: u.status }
+      // 非超级管理员不得授予管理员角色：编辑框内强制回落到普通用户，
+      // 与后端 R9-01 的校验一致（避免下拉框出现无匹配选项）。
+      const editableRole = this.role === 'superadmin' ? u.role : 'user'
+      this.userForm = { username: u.username, email: u.email || '', password: '', role: editableRole, status: u.status }
       this.editingUser = u
     },
     async saveUser() {

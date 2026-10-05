@@ -24,6 +24,7 @@ export default {
     save: '保存'
   },
   users: {
+    legacyPending: '检测到 {n} 个账号仍存在服务端可解密的旧数据（未完成迁移），请在 {v} 版本前登录客户端完成迁移。',
     add: '添加用户',
     username: '用户名',
     email: '邮箱',
@@ -56,6 +57,12 @@ export default {
     currentPassword: '当前密码',
     newPassword: '新密码',
     changeAvatar: '更换头像',
+    emailCode: '邮箱验证码',
+    emailCodeRequired: '请先获取并填写新邮箱验证码',
+    currentPasswordRequired: '请填写当前密码',
+    sendCode: '发送验证码',
+    sending: '发送中…',
+    codeSent: '验证码已发送，请查收邮件',
     edit: '编辑个人信息'
   },
   msg: {

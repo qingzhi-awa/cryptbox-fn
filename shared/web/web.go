@@ -12,6 +12,35 @@ import (
 //go:embed all:dist
 var assets embed.FS
 
+// ContentSecurityPolicy 是 Web 管理后台下发的 CSP。
+//
+// 设计依据（逐指令）：
+//   - default-src 'self'      ：默认全部同源，杜绝外部资源注入；
+//   - script-src 'self'       ：仅同源脚本，**既不放行 'unsafe-eval' 也不放行 'unsafe-inline'**。
+//     构建期已把 vue-i18n 切到 AST 解释器（vite.config.js 中 `__INTLIFY_JIT_COMPILATION__=true`），
+//     产物不再包含 `new Function`，因此无需 eval；内联 <script> 与事件属性同样被阻断
+//     （这是 XSS 的主要面）。
+//   - style-src 'self' 'unsafe-inline'：Vue 运行时会注入内联 <style>，必须放行；
+//   - img-src 'self' data: blob:：头像/图标为同源，data:/blob: 供本地上传预览；
+//   - font-src 'self' data:   ：字体同源或内联；
+//   - connect-src 'self'      ：API 全部为同源相对路径（fetch('api/...')）；
+//   - object-src 'none'       ：禁用 <object>/<embed>/<applet>；
+//   - base-uri 'self'         ：阻止通过 <base> 劫持相对链接；
+//   - form-action 'self'      ：表单只能提交到同源。
+//
+// 重要：**故意不下发 frame-ancestors**。本应用需要被 fnOS 桌面以 iframe 形式
+// 内嵌（与 fnOS 桌面不同源），'none'/'self' 都会阻止该集成——与同处不下发
+// X-Frame-Options 的既有决策保持一致。
+const ContentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; " +
+	"font-src 'self' data:; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'self'; " +
+	"form-action 'self'"
+
 type ctxKey struct{ name string }
 
 var originalPathKey = ctxKey{"cryptbox-original-path"}
@@ -38,6 +67,8 @@ func Serve(fallback http.Handler) http.Handler {
 		// 注意：不下发 X-Frame-Options——本应用需要被 fnOS 桌面以 iframe 形式内嵌。
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		// CSP 作为第二道防线（见 ContentSecurityPolicy 说明；故意不含 frame-ancestors）。
+		w.Header().Set("Content-Security-Policy", ContentSecurityPolicy)
 		if r.TLS != nil {
 			// 仅在真实 TLS 连接上下发 HSTS：飞牛统一网关经明文 socket 转发应用响应，
 			// 若在此透传 HSTS，会以 NAS 主机名记录长达一年的强制 HTTPS。

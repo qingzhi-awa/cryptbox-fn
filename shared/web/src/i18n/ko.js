@@ -24,6 +24,7 @@ export default {
     save: '저장'
   },
   users: {
+    legacyPending: '{n}개의 계정에 서버에서 복호화 가능한 이전 데이터가 남아 있습니다(마이그레이션 미완료). 버전 {v} 이전에 클라이언트에서 마이그레이션을 완료하세요.',
     add: '사용자 추가',
     username: '사용자명',
     email: '이메일',
@@ -47,6 +48,12 @@ export default {
     currentPassword: '현재 비밀번호',
     newPassword: '새 비밀번호',
     changeAvatar: '아바타 변경',
+    emailCode: '이메일 인증 코드',
+    emailCodeRequired: '새 이메일로 전송된 코드를 입력하세요',
+    currentPasswordRequired: '현재 비밀번호를 입력하세요',
+    sendCode: '코드 보내기',
+    sending: '전송 중…',
+    codeSent: '인증 코드를 보냈습니다. 받은 편지함을 확인하세요',
     edit: '프로필 편집'
   },
   msg: {

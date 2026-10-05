@@ -214,3 +214,70 @@ func mustMaster(t *testing.T, password, salt string) []byte {
 	}
 	return m
 }
+
+// TestPasswordResetKeepsKdfSalt 锁定「旧密码恢复」所依赖的**隐式契约**：
+// 重置密码（改口令哈希）时，`users.kdf_salt` 必须保持原值不变。
+//
+// 原因：恢复路径用旧密码 + kdf_salt 重新派生出与当初包裹 `vault_key_enc` 时
+// 完全相同的 master key，才能解开旧 vault key。若将来有人在改密流程里顺手
+// 重新生成 kdf_salt，旧密码将再也派生不出同一 master key，恢复路径会静默失效
+// （一律报 OLD_PASSWORD_WRONG），存量用户的旧密码库永久丢失。
+//
+// 客户端对应注释见 `client/src-tauri/src/app.rs` 的 `recover_vault` 文档。
+func TestPasswordResetKeepsKdfSalt(t *testing.T) {
+	r, database := newTestServer(t)
+
+	const (
+		oldPw = "OldPass123"
+		newPw = "NewPass456"
+		salt  = "dGVzdC1zYWx0LXRlc3Qtc2FsdA=="
+	)
+
+	masterOld, err := crypto.ScryptDerive([]byte(oldPw), []byte(salt))
+	if err != nil {
+		t.Fatalf("derive old master: %v", err)
+	}
+	vaultKeyEnc, err := crypto.AESEncrypt(masterOld, []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("wrap vault key: %v", err)
+	}
+	code, resp := doJSON(t, r, http.MethodPost, "/api/setup", "", map[string]any{
+		"username": "bob", "password": oldPw, "vault_key_enc": vaultKeyEnc, "kdf_salt": salt,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("setup: code=%d resp=%v", code, resp)
+	}
+
+	// 重置密码：只改口令哈希，不动 kdf_salt（这正是被锁定的契约）。
+	newHash, err := auth.HashPassword(newPw)
+	if err != nil {
+		t.Fatalf("hash new pw: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE users SET password_hash = ? WHERE username = 'bob'`, newHash); err != nil {
+		t.Fatalf("reset password: %v", err)
+	}
+
+	// 断言 1：库里的 kdf_salt 未被改动。
+	var saltAfter string
+	if err := database.QueryRow(`SELECT kdf_salt FROM users WHERE username = 'bob'`).Scan(&saltAfter); err != nil {
+		t.Fatalf("读取 kdf_salt: %v", err)
+	}
+	if saltAfter != salt {
+		t.Fatalf("重置密码后 kdf_salt 发生了改变（%q → %q）：旧密码恢复路径将永久失效", salt, saltAfter)
+	}
+
+	// 断言 2：登录响应下发的 kdf_salt 与初始一致，客户端据此才能复现同一 master key。
+	code, resp = doJSON(t, r, http.MethodPost, "/api/login", "", map[string]any{"username": "bob", "password": newPw})
+	if code != http.StatusOK {
+		t.Fatalf("login with new pw: code=%d", code)
+	}
+	if got, _ := resp["kdf_salt"].(string); got != salt {
+		t.Fatalf("登录响应的 kdf_salt 应为 %q，实际 %q", salt, got)
+	}
+
+	// 断言 3：用旧密码 + 该 salt 派生的 master key，仍能解开库中的 vault_key_enc。
+	encFromServer, _ := resp["vault_key_enc"].(string)
+	if _, err := crypto.AESDecrypt(mustMaster(t, oldPw, salt), encFromServer); err != nil {
+		t.Fatalf("旧密码无法解开 vault_key_enc，kdf_salt 稳定性契约被破坏: %v", err)
+	}
+}

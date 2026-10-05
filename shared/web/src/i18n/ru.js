@@ -24,6 +24,7 @@ export default {
     save: 'Сохранить'
   },
   users: {
+    legacyPending: 'У {n} учётных записей остались старые данные, расшифровываемые сервером (миграция не завершена). Завершите миграцию до версии {v}.',
     add: 'Добавить пользователя',
     username: 'Логин',
     email: 'Эл. почта',
@@ -47,6 +48,12 @@ export default {
     currentPassword: 'Текущий пароль',
     newPassword: 'Новый пароль',
     changeAvatar: 'Сменить аватар',
+    emailCode: 'Код подтверждения e-mail',
+    emailCodeRequired: 'Запросите и введите код, отправленный на новый e-mail',
+    currentPasswordRequired: 'Введите текущий пароль',
+    sendCode: 'Отправить код',
+    sending: 'Отправка…',
+    codeSent: 'Код отправлен, проверьте почту',
     edit: 'Редактировать профиль'
   },
   msg: {

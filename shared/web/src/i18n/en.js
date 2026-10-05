@@ -24,6 +24,7 @@ export default {
     save: 'Save'
   },
   users: {
+    legacyPending: '{n} account(s) still hold server-decryptable legacy data (migration incomplete). Finish migration before version {v}.',
     add: 'Add User',
     username: 'Username',
     email: 'Email',
@@ -56,6 +57,12 @@ export default {
     currentPassword: 'Current Password',
     newPassword: 'New Password',
     changeAvatar: 'Change Avatar',
+    emailCode: 'Email Verification Code',
+    emailCodeRequired: 'Please request and enter the code sent to the new email',
+    currentPasswordRequired: 'Please enter your current password',
+    sendCode: 'Send Code',
+    sending: 'Sending…',
+    codeSent: 'Verification code sent, please check your inbox',
     edit: 'Edit Profile'
   },
   msg: {

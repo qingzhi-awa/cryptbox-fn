@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -39,6 +40,7 @@ const (
 	loginFailMax           = 5
 	loginFailLockFor       = 15 * time.Minute
 	registerIPPerMinute    = 10
+	setupIPPerMinute       = 5
 	resetIPPerMinute       = 20
 	resetEmailPerWindow    = 15
 	resetEmailWindow       = 15 * time.Minute
@@ -63,10 +65,84 @@ type Server struct {
 	loginIP       *ratelimit.Limiter
 	loginLock     *ratelimit.FailLocker
 	registerIP    *ratelimit.Limiter
+	setupIP       *ratelimit.Limiter
 	resetIP       *ratelimit.Limiter
 	resetEmail    *ratelimit.Limiter
 	sendCodeIP    *ratelimit.Limiter
 	sendCodeEmail *ratelimit.Limiter
+}
+
+// legacyMigrationDoneKeyPrefix 是 meta 表中"旧明文数据已迁移完成"标记的**键前缀**。
+//
+// 重要：标记必须**按用户**隔离，键形如 `legacy_migration_done:<user_id>`。
+// 若用一个全局键（如早期的 `legacy_migration_done`），任一用户（哪怕是最普通的
+// 用户）调用一次 POST /api/vault/legacy/done，就会把**全服务器所有用户**的
+// legacy 迁移接口一起封死（410 Gone），导致其他人重置密码后永久无法迁移旧数据。
+//
+// 每个用户只有自己的 vault 需要迁移，因此标记天然是账号级的。
+const legacyMigrationDoneKeyPrefix = "legacy_migration_done:"
+
+// legacyMigrationKey 返回某用户的 legacy 迁移完成标记键（按 user_id 隔离）。
+func legacyMigrationKey(userID int64) string {
+	return legacyMigrationDoneKeyPrefix + strconv.FormatInt(userID, 10)
+}
+
+// legacyMigrationDone 判断该用户的旧数据迁移是否已完成。
+//
+// 兼容性：早期版本曾把标记写成**全局**键 `legacy_migration_done`。为不丢失那次
+// 已经完成的迁移结论（升级后不应让已迁移用户重新看到 legacy 接口），这里同时
+// 兼容识别该历史全局键——但**只读不写**，新标记一律写账号级键。
+func (s *Server) legacyMigrationDone(userID int64) bool {
+	if db.GetMeta(s.DB, legacyMigrationKey(userID)) == "1" {
+		return true
+	}
+	return db.GetMeta(s.DB, "legacy_migration_done") == "1"
+}
+
+// markLegacyMigrationDone 落该用户的"迁移已完成"标记。
+func (s *Server) markLegacyMigrationDone(userID int64, username string, ip string) error {
+	if err := db.SetMeta(s.DB, legacyMigrationKey(userID), "1"); err != nil {
+		return err
+	}
+	log.LogAction(s.DB, userID, username, "legacy_migrated", "旧明文数据迁移完成，已关闭该账号的 legacy 接口", ip)
+	return nil
+}
+
+// legacyAPIRemoveVersion 是计划移除 legacy 明文迁移接口（GET /api/vault/legacy）的版本。
+//
+// 该接口会以**明文**返回服务端静态密钥可解的历史条目，只是过渡期的"一次性后门"。
+// 迁移必须由客户端持有 vault key 时完成，服务端无法代办；为避免它无限期存在，
+// 约定在 0.3.0 移除。届时仍未迁移的账号，其历史条目需在客户端重新录入。
+const legacyAPIRemoveVersion = "0.3.0"
+
+// userHasLegacyPlaintext 判断该账号是否仍有可用服务端静态密钥解密的历史条目。
+// 逐条尝试解密，命中一条即返回（无需统计全部），用于管理侧"未迁移账号"提示。
+func (s *Server) userHasLegacyPlaintext(userID int64) (bool, error) {
+	if len(s.EncKey) == 0 {
+		return false, nil
+	}
+	rows, err := s.DB.Query(`SELECT password_enc, notes_enc FROM entries WHERE user_id = ?`, userID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pwEnc, notesEnc string
+		if err := rows.Scan(&pwEnc, &notesEnc); err != nil {
+			return false, err
+		}
+		if pwEnc != "" {
+			if _, err := crypto.AESDecryptString(s.EncKey, pwEnc); err == nil {
+				return true, nil
+			}
+		}
+		if notesEnc != "" {
+			if _, err := crypto.AESDecryptString(s.EncKey, notesEnc); err == nil {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
 }
 
 // NewServer 构造一个 Server 实例。
@@ -79,6 +155,7 @@ func NewServer(cfg config.Config, database *sql.DB, encKey []byte) *Server {
 		loginIP:       ratelimit.New(loginIPPerMinute, time.Minute),
 		loginLock:     ratelimit.NewFailLocker(loginFailMax, loginFailLockFor),
 		registerIP:    ratelimit.New(registerIPPerMinute, time.Minute),
+		setupIP:       ratelimit.New(setupIPPerMinute, time.Minute),
 		resetIP:       ratelimit.New(resetIPPerMinute, time.Minute),
 		resetEmail:    ratelimit.New(resetEmailPerWindow, resetEmailWindow),
 		sendCodeIP:    ratelimit.New(sendCodeIPPerHour, time.Hour),
@@ -89,16 +166,31 @@ func NewServer(cfg config.Config, database *sql.DB, encKey []byte) *Server {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			s.loginIP.Cleanup()
-			s.loginLock.Cleanup()
-			s.registerIP.Cleanup()
-			s.resetIP.Cleanup()
-			s.resetEmail.Cleanup()
-			s.sendCodeIP.Cleanup()
-			s.sendCodeEmail.Cleanup()
+			for _, l := range s.limiters() {
+				l.Cleanup()
+			}
 		}
 	}()
 	return s
+}
+
+// limiters 返回所有需要周期性 Cleanup 的限流器（单一来源）。
+//
+// 新增限流字段时**必须**同步加入此处，否则该限流器的键表会随攻击者可控的键
+// （来源 IP / 邮箱 / 账号）无限增长（R10-01：`setupIP` 曾因此遗漏）。
+// 这一不变量由 `TestAllLimitersAreCleaned` 用反射守住：任何实现了 `Cleanup()`
+// 的 Server 字段都必须出现在本列表中。
+func (s *Server) limiters() []interface{ Cleanup() } {
+	return []interface{ Cleanup() }{
+		s.loginIP,
+		s.loginLock,
+		s.registerIP,
+		s.setupIP,
+		s.resetIP,
+		s.resetEmail,
+		s.sendCodeIP,
+		s.sendCodeEmail,
+	}
 }
 
 // RegisterRoutes 在 gin.Engine 上注册全部 API 路由与 CORS 中间件。
@@ -124,8 +216,7 @@ func (s *Server) register(r *gin.Engine) {
 		// 证书指纹：客户端首次连接自签服务器时用于「信任首次使用」（TOFU）核对。
 		api.GET("/fingerprint", s.handleFingerprint)
 		api.GET("/status", s.handleStatus)
-		api.POST("/setup", s.handleSetup)
-		api.GET("/avatar/:id", s.handleGetAvatar)
+		api.POST("/setup", s.ipLimit(s.setupIP, "请求过于频繁，请稍后再试"), s.handleSetup)
 		api.POST("/register", s.ipLimit(s.registerIP, "注册请求过于频繁，请稍后再试"), s.handleRegister)
 		api.POST("/register/send-code", s.ipLimit(s.sendCodeIP, "验证码发送过于频繁，请稍后再试"), s.handleSendRegisterCode)
 		api.GET("/settings/public", s.handlePublicSettings)
@@ -141,12 +232,17 @@ func (s *Server) register(r *gin.Engine) {
 			authed.GET("/me", s.handleMe)
 			authed.PUT("/me", s.handleUpdateMe)
 			authed.POST("/me/avatar", s.handleUploadAvatar)
+			// 头像属用户 PII：要求登录后访问（Web 端 <img> 同源请求自动带 Cookie；
+			// 桌面端由 Rust 侧带 JWT 代理拉取），防止未认证者按自增 id 枚举全量头像。
+			authed.GET("/avatar/:id", s.handleGetAvatar)
 			// 密码条目统一走端到端加密的 Vault 协议（整库上传/下载），不存在明文接口。
 			authed.GET("/vault", s.handleGetVault)
 			authed.PUT("/vault", s.handlePutVault)
 			authed.PUT("/vault-key", s.handlePutVaultKey)
 			// 旧数据迁移专用：返回历史上由服务端静态密钥加密的明文，迁移完成后不再返回数据。
 			authed.GET("/vault/legacy", s.handleGetLegacy)
+			// 迁移完成上报：前端迁移成功后落标记，服务端据此永久关闭 legacy 明文接口。
+			authed.POST("/vault/legacy/done", s.handleLegacyMigrationDone)
 			// 密码重置后放弃旧密码库：清空本账号全部条目密文并重置 vault key（见 handleDeleteVault）。
 			authed.DELETE("/vault", s.handleDeleteVault)
 			// 置顶同步开关（账号级）：开启后置顶作为密码库数据参与多端同步；
@@ -164,6 +260,8 @@ func (s *Server) register(r *gin.Engine) {
 			authed.POST("/vault/delete", s.handleDeleteVault)
 			authed.POST("/vault-key", s.handlePutVaultKey)
 			authed.POST("/me/update", s.handleUpdateMe)
+			// 自助改绑邮箱：向新邮箱发送所有权验证码（R7-01）。
+			authed.POST("/me/email-code", s.handleSendMyEmailCode)
 
 			// 管理员
 			admin := authed.Group("", s.adminMiddleware())
@@ -175,6 +273,8 @@ func (s *Server) register(r *gin.Engine) {
 				admin.PUT("/users/:id", s.handleUpdateUser)
 				admin.PUT("/users/:id/status", s.handleUpdateUserStatus)
 				admin.GET("/logs", s.handleListLogs)
+				// 过渡期提示：仍存在服务端可解密历史条目（未迁移）的账号清单。
+				admin.GET("/legacy-pending", s.handleListLegacyPending)
 				admin.GET("/settings", s.handleGetSettings)
 				admin.PUT("/settings", s.handleUpdateSettings)
 				admin.POST("/settings/test-email", s.handleTestEmail)
@@ -199,10 +299,12 @@ func (s *Server) register(r *gin.Engine) {
 // NAS 主机名记录长达一年的强制 HTTPS，波及该主机上的其他服务与子域。
 // 注意：不下发 X-Frame-Options——本应用需要被 fnOS 桌面以 iframe 形式内嵌
 // （应用入口与 fnOS 桌面不同源），DENY/SAMEORIGIN 都会阻止该集成。
+// CSP 复用 shared/web.ContentSecurityPolicy（同样不含 frame-ancestors）。
 func securityHeadersMiddleware(cfg config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Content-Security-Policy", web.ContentSecurityPolicy)
 		if c.Request.TLS != nil {
 			c.Header("Strict-Transport-Security", "max-age=31536000")
 		}
@@ -314,6 +416,29 @@ func sessionCookiePath(c *gin.Context) string {
 	return "/"
 }
 
+// secureRequest 判断当前请求是否应把会话 Cookie 标记为 Secure。
+//
+// 直连端口且为真 TLS 时恒为真。经反向代理 / 飞牛统一网关时，服务端收到的连接是
+// 明文（网关经 unix socket 明文转发），`c.Request.TLS` 恒为 nil——此时唯一的
+// "客户端是否处于 HTTPS" 依据是转发协议头 X-Forwarded-Proto。
+//
+// 安全约束：转发头只有在**采信代理头**时才允许影响判定（log.ProxyTrusted，与
+// clientIP 同一决策），否则直连客户端可伪造 `X-Forwarded-Proto: https` 骗服务端
+// 下发 Secure Cookie（在不支持 Secure 的场景下会导致 Cookie 被浏览器丢弃）。
+func secureRequest(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	if !log.ProxyTrusted(c.Request) {
+		return false
+	}
+	proto := strings.TrimSpace(strings.ToLower(c.GetHeader("X-Forwarded-Proto")))
+	if i := strings.Index(proto, ","); i >= 0 {
+		proto = strings.TrimSpace(proto[:i])
+	}
+	return proto == "https"
+}
+
 // setSessionCookie 在登录成功后下发 HttpOnly 会话 Cookie。
 // 网关会剥离 Authorization 头，Cookie 是内嵌场景下唯一可靠的凭据通道。
 func setSessionCookie(c *gin.Context, token string) {
@@ -323,7 +448,7 @@ func setSessionCookie(c *gin.Context, token string) {
 		Path:     sessionCookiePath(c),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   c.Request.TLS != nil,
+		Secure:   secureRequest(c),
 		MaxAge:   int(authCookieMaxAge.Seconds()),
 	})
 }
@@ -335,6 +460,7 @@ func clearSessionCookie(c *gin.Context) {
 		Path:     sessionCookiePath(c),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secureRequest(c),
 		MaxAge:   -1,
 	})
 }
@@ -573,18 +699,29 @@ func (s *Server) handleRegister(c *gin.Context) {
 		writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
 		return
 	}
+	// 邮箱唯一性（R7-01）：该邮箱已被占用则拒绝注册。
+	// 此处调用方已通过邮箱验证码证明了对该邮箱的控制权，故直接提示不构成邮箱枚举泄露。
+	var emailUsed int
+	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, req.Email).Scan(&emailUsed); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if emailUsed > 0 {
+		writeJSON(c, http.StatusConflict, gin.H{"error": "该邮箱已被注册，请直接登录或使用找回密码"})
+		return
+	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	id, err := db.FindNextUserID(s.DB)
+	id, err := db.CreateUserWithNextID(s.DB, req.Username, hash, "user", req.Email, strings.TrimSpace(req.KdfSalt), req.VaultKeyEnc)
 	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	_, err = s.DB.Exec(`INSERT INTO users (id, username, password_hash, role, status, email, vault_key_enc, kdf_salt) VALUES (?, ?, ?, 'user', 'active', ?, ?, ?)`, id, req.Username, hash, req.Email, req.VaultKeyEnc, strings.TrimSpace(req.KdfSalt))
-	if err != nil {
+		// 注册场景的用户名冲突同样属业务错误：返回 409 而非 500。
+		if errors.Is(err, db.ErrUsernameTaken) {
+			writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
+			return
+		}
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -603,7 +740,17 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 	login := strings.TrimSpace(req.Username)
-	lockKey := strings.ToLower(login)
+	// 失败锁定键：**来源 IP + 账号** 联合维度。
+	//
+	// 早期实现只用账号名作键，导致「账号锁定 DoS」（R6-01）：任何人只要知道
+	// 受害者用户名，用 5 次错误密码即可把该账号全局锁定 15 分钟，且到期后可
+	// 立即续锁——受害者本人（密码正确、来自完全不同 IP）同样被拒。
+	//
+	// 加入来源维度后：
+	//   - 同一来源对同一账号连续失败仍会被锁定（防暴力破解能力不变）；
+	//   - 攻击者只能锁住「自己那一个来源」，不影响受害者从其他来源正常登录。
+	// 跨来源的分布式暴力破解另有 `loginIP` 全局限流兜底（见路由上的 ipLimit）。
+	lockKey := loginLockKey(clientIP(c), login)
 	// 账号维度失败锁定：抵御针对单一账号的口令暴力破解。
 	if s.loginLock.Locked(lockKey) {
 		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "登录失败次数过多，请 15 分钟后再试"})
@@ -618,7 +765,13 @@ func (s *Server) handleLogin(c *gin.Context) {
 		vaultKeyEnc string
 		kdfSalt     string
 	)
-	err := s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE username = ? OR email = ?`, login, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
+	// R7-01：登录标识消歧。原实现 `WHERE username = ? OR email = ?` 在(username/email)
+	// 命中多行时，QueryRow 只取第一行且无序，可能登错账号或使受害者被拒。
+	// 改为"用户名精确匹配优先，未命中再按邮箱匹配"；邮箱已由唯一索引保证唯一。
+	err := s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE username = ?`, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
+	if err == sql.ErrNoRows {
+		err = s.DB.QueryRow(`SELECT id, username, password_hash, role, status, COALESCE(vault_key_enc, ''), COALESCE(kdf_salt, '') FROM users WHERE email = ?`, login).Scan(&id, &uname, &hash, &role, &status, &vaultKeyEnc, &kdfSalt)
+	}
 	if err == sql.ErrNoRows || (err == nil && !auth.CheckPassword(hash, req.Password)) {
 		s.loginLock.Fail(lockKey)
 		log.LogAction(s.DB, 0, login, "login_failed", "登录失败", clientIP(c))
@@ -630,7 +783,10 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 	if status != "active" {
-		writeJSON(c, http.StatusForbidden, gin.H{"error": "账号已被停用"})
+		// R8-06：不对外回显"账号已被停用"，避免一次性泄露"账号存在 + 口令正确 + 状态"。
+		// 对外与失败路径保持一致的通用文案，差异仅进审计日志供管理员排查。
+		log.LogAction(s.DB, id, uname, "login_disabled", "停用账号尝试登录", clientIP(c))
+		writeJSON(c, http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
 		return
 	}
 	s.loginLock.Reset(lockKey)
@@ -664,7 +820,27 @@ func (s *Server) handleDeleteVault(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	// "放弃旧密码库"在语义上必须彻底：同时落标记封死本账号的 legacy 明文接口，
+	// 否则只要 entries 表还残留任何可解密文，GET /vault/legacy 仍会吐明文。
+	// 标记按 user_id 隔离，只影响当前用户，不会波及其他账号的迁移。
+	if err := db.SetMeta(s.DB, legacyMigrationKey(claims.UserID), "1"); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "reset_vault", "清空密码库并重置 vault key", clientIP(c))
+	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleLegacyMigrationDone 由前端在旧数据迁移成功后调用，落"迁移已完成"标记。
+// 此后该账号的 GET /vault/legacy 返回 410，明文接口彻底关闭（一次性后门）。
+//
+// 标记**按账号隔离**：一个用户完成迁移不能影响其他用户的迁移能力。
+func (s *Server) handleLegacyMigrationDone(c *gin.Context) {
+	claims := currentClaims(c)
+	if err := s.markLegacyMigrationDone(claims.UserID, claims.Username, clientIP(c)); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -725,8 +901,11 @@ func defaultLanguage(database *sql.DB) string {
 }
 
 // purgeExpiredTrash 删除超过保留天数的墓碑条目（默认 30 天）。
+// 时间基准统一用 UTC：条目的 updated_at 由各端写入，RFC3339 带时区偏移在字符串比较
+// 下不可比（"+08:00" 与 "Z" 混排会给出错误结论）；两端统一 UTC 后字符串比较才有意义。
+// 注：真正可靠的冲突裁决已改用 revision 列，此处仅用于回收站过期判断。
 func (s *Server) purgeExpiredTrash(userID int64) {
-	threshold := time.Now().AddDate(0, 0, -recycleDays(s.DB)).Format(time.RFC3339)
+	threshold := time.Now().UTC().AddDate(0, 0, -recycleDays(s.DB)).Format(time.RFC3339)
 	_, _ = s.DB.Exec(`DELETE FROM entries WHERE user_id = ? AND deleted = 1 AND updated_at < ?`, userID, threshold)
 }
 
@@ -820,15 +999,28 @@ func (s *Server) handlePutVaultPinSync(c *gin.Context) {
 }
 
 // handleGetLegacy 返回历史上由服务端静态密钥加密的条目明文，仅用于一次性迁移到端到端加密。
-// 迁移完成后条目已改为 vault key 加密，解密失败即被跳过，该接口最终返回空列表。
+//
+// 安全约束（PT：明文后门）：本接口会遍历全表并尝试用服务端静态密钥解密，任何一条
+// 恰好可解的记录都会以**明文**返回。它绝不能长期开放，因此：
+//   - 迁移一旦完成，前端调用 POST /api/vault/legacy/done 落**该账号的**迁移标记；
+//   - 标记存在时本接口直接返回 410 Gone，不再做任何遍历/解密；
+//   - 放弃旧密码库（DELETE /vault）同样落标记——语义上"放弃旧数据"必须同时封死 legacy；
+//   - 标记按 user_id 隔离：任一用户完成迁移**不会**影响其他账号的迁移能力。
+//
+// 生命期：本接口计划在 legacyAPIRemoveVersion（0.3.0）移除。管理员可经
+// GET /api/legacy-pending 查询"仍存在服务端可解密历史条目"的账号并督促其迁移。
 func (s *Server) handleGetLegacy(c *gin.Context) {
 	claims := currentClaims(c)
 	list := []db.Entry{}
+	if s.legacyMigrationDone(claims.UserID) {
+		writeJSON(c, http.StatusGone, gin.H{"error": "legacy migration already done"})
+		return
+	}
 	if len(s.EncKey) == 0 {
 		writeJSON(c, http.StatusOK, gin.H{"entries": list})
 		return
 	}
-	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned FROM entries WHERE user_id = ? ORDER BY sort_order ASC, id ASC`, claims.UserID)
+	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned, revision FROM entries WHERE user_id = ? ORDER BY sort_order ASC, id ASC`, claims.UserID)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -839,7 +1031,7 @@ func (s *Server) handleGetLegacy(c *gin.Context) {
 		var pwEnc, notesEnc string
 		var deleted int
 		var pinned bool
-		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned); err != nil {
+		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned, &e.Revision); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -860,6 +1052,62 @@ func (s *Server) handleGetLegacy(c *gin.Context) {
 		list = append(list, e)
 	}
 	writeJSON(c, http.StatusOK, gin.H{"entries": list})
+}
+
+// handleListLegacyPending 列出「仍可能存在服务端可解密历史条目」的账号，供管理员督促迁移。
+//
+// 判定：未落 legacy 迁移标记，且该账号 entries 表中存在至少一条可用服务端静态密钥
+// 解密的记录。这类账号的历史条目仍以端到端加密前的格式（服务端可解密）存在，
+// 是过渡期的残余暴露面；legacyAPIRemoveVersion 之后接口关闭，未迁移数据需重新录入。
+func (s *Server) handleListLegacyPending(c *gin.Context) {
+	type pending struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		Email    string `json:"email"`
+	}
+	list := []pending{}
+	// 无服务端静态密钥时不存在"服务端可解密"的条目，直接返回空。
+	if len(s.EncKey) != 0 {
+		rows, err := s.DB.Query(`SELECT id, username, COALESCE(email, '') FROM users ORDER BY id`)
+		if err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		type urow struct {
+			id    int64
+			name  string
+			email string
+		}
+		var users []urow
+		for rows.Next() {
+			var u urow
+			if err := rows.Scan(&u.id, &u.name, &u.email); err != nil {
+				rows.Close()
+				writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+				return
+			}
+			users = append(users, u)
+		}
+		rows.Close()
+		for _, u := range users {
+			if s.legacyMigrationDone(u.id) {
+				continue
+			}
+			has, err := s.userHasLegacyPlaintext(u.id)
+			if err != nil {
+				writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+				return
+			}
+			if has {
+				list = append(list, pending{ID: u.id, Username: u.name, Email: u.email})
+			}
+		}
+	}
+	writeJSON(c, http.StatusOK, gin.H{
+		"count":          len(list),
+		"users":          list,
+		"remove_version": legacyAPIRemoveVersion,
+	})
 }
 
 // ---- 用户管理（仅管理员） ----
@@ -886,6 +1134,23 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	writeJSON(c, http.StatusOK, gin.H{"users": list})
 }
 
+// reservedUsernames 是系统保留用户名集合，普通用户/管理员不得占用。
+//
+// 保留原因：历史兼容迁移 SeedAdmin 与用户名 "admin" 相关联。虽然该迁移已改为
+// 一次性、带版本守卫（见 db.SeedAdmin），仍禁止新增/改名出保留名，作为纵深防御，
+// 避免任何"用户名即角色"的隐式耦合再次成为提权面。
+var reservedUsernames = map[string]bool{
+	"admin":      true,
+	"root":       true,
+	"superadmin": true,
+	"system":     true,
+}
+
+// isReservedUsername 判断用户名是否为系统保留名（大小写不敏感）。
+func isReservedUsername(name string) bool {
+	return reservedUsernames[strings.ToLower(strings.TrimSpace(name))]
+}
+
 func (s *Server) handleCreateUser(c *gin.Context) {
 	var req struct {
 		Username string `json:"username"`
@@ -903,12 +1168,23 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "用户名不能为空，密码至少 6 位"})
 		return
 	}
+	if isReservedUsername(req.Username) {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "该用户名为系统保留名，不可使用"})
+		return
+	}
 	if req.Email == "" {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱不能为空"})
 		return
 	}
 	if req.Role != "admin" && req.Role != "user" {
 		req.Role = "user"
+	}
+	// 等级隔离（R9-01）：创建管理员账号属特权操作，仅 superadmin 可执行。
+	// 否则普通 admin 虽不能管理同级 admin（R8-01），仍可"造一个管理员出来"，
+	// 形成绕开同级隔离的提权路径。
+	if req.Role == "admin" && currentClaims(c).Role != "superadmin" {
+		writeJSON(c, http.StatusForbidden, gin.H{"error": "仅超级管理员可创建管理员账号"})
+		return
 	}
 	var exists int
 	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE username = ?`, req.Username).Scan(&exists); err != nil {
@@ -919,18 +1195,30 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
 		return
 	}
+	// 邮箱唯一性（R7-01）：管理员添加用户时的邮箱也不得与他人重复。
+	if req.Email != "" {
+		var emailUsed int
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, req.Email).Scan(&emailUsed); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		if emailUsed > 0 {
+			writeJSON(c, http.StatusConflict, gin.H{"error": "该邮箱已被其他账号使用"})
+			return
+		}
+	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	id, err := db.FindNextUserID(s.DB)
-	if err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	_, err = s.DB.Exec(`INSERT INTO users (id, username, password_hash, role, status, email) VALUES (?, ?, ?, ?, 'active', ?)`, id, req.Username, hash, req.Role, req.Email)
-	if err != nil {
+	if _, err := db.CreateUserWithNextID(s.DB, req.Username, hash, req.Role, req.Email, "", ""); err != nil {
+		// 并发下两个同名请求可能都通过前置查重：此时应返回 409（业务冲突），
+		// 而非 500（伪装成重试耗尽）。
+		if errors.Is(err, db.ErrUsernameTaken) {
+			writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
+			return
+		}
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -968,6 +1256,12 @@ func (s *Server) handleImportUsers(c *gin.Context) {
 		if rl == "admin" || rl == "管理员" || rl == "管理員" {
 			role = "admin"
 		}
+		// 等级隔离（R9-01）：非 superadmin 不得借批量导入创建管理员账号——
+		// 该行按"无法创建"处理（计入 skipped），避免绕过 handleCreateUser 的限制。
+		if role == "admin" && claims.Role != "superadmin" {
+			skipped++
+			continue
+		}
 		var exists int
 		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE username = ?`, username).Scan(&exists); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -977,18 +1271,29 @@ func (s *Server) handleImportUsers(c *gin.Context) {
 			skipped++
 			continue
 		}
+		// 邮箱唯一性（R7-01）：邮箱已被占用（含本批先前导入的行）则该行跳过。
+		if em := strings.TrimSpace(u.Email); em != "" {
+			var emailUsed int
+			if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, em).Scan(&emailUsed); err != nil {
+				writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+				return
+			}
+			if emailUsed > 0 {
+				skipped++
+				continue
+			}
+		}
 		hash, err := auth.HashPassword(password)
 		if err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 			return
 		}
-		id, err := db.FindNextUserID(s.DB)
-		if err != nil {
-			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
-			return
-		}
-		if _, err := s.DB.Exec(`INSERT INTO users (id, username, password_hash, role, status, email) VALUES (?, ?, ?, ?, 'active', ?)`,
-			id, username, hash, role, strings.TrimSpace(u.Email)); err != nil {
+		if _, err := db.CreateUserWithNextID(s.DB, username, hash, role, strings.TrimSpace(u.Email), "", ""); err != nil {
+			// 批量导入时并发同名属"该行跳过"，不应中断整批导入。
+			if errors.Is(err, db.ErrUsernameTaken) {
+				skipped++
+				continue
+			}
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -1027,6 +1332,8 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	// 头像文件随账号一并删除：id 会被后续注册复用，残留头像会被新用户继承展示。
+	removeAvatarFiles(id)
 	_, err = s.DB.Exec(`DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -1119,6 +1426,9 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
 		username = target.Username
+	} else if username != target.Username && isReservedUsername(username) {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "该用户名为系统保留名，不可使用"})
+		return
 	}
 	role := target.Role
 	if req.Role != "" {
@@ -1127,6 +1437,12 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 			return
 		}
 		role = req.Role
+	}
+	// 等级隔离（R9-01）：把普通用户提升为管理员是特权操作，仅 superadmin 可执行；
+	// 否则 admin 可"造/升"出一个不受同级隔离约束的中间人（R8-01 的旁路）。
+	if role == "admin" && target.Role != "admin" && claims.Role != "superadmin" {
+		writeJSON(c, http.StatusForbidden, gin.H{"error": "仅超级管理员可授予管理员角色"})
+		return
 	}
 	status := target.Status
 	if req.Status != "" {
@@ -1151,6 +1467,19 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	email := strings.TrimSpace(req.Email)
 	if email == "" {
 		email = target.Email
+	}
+	// 邮箱唯一性（R7-01）：管理员改他人邮箱无需所有权验证码（管理员可管理该用户），
+	// 但必须避免与他人的邮箱重复。
+	if email != target.Email {
+		var emailUsed int
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, email, id).Scan(&emailUsed); err != nil {
+			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		if emailUsed > 0 {
+			writeJSON(c, http.StatusConflict, gin.H{"error": "该邮箱已被其他账号使用"})
+			return
+		}
 	}
 	if req.Password != "" {
 		if len(req.Password) < 6 {
@@ -1178,12 +1507,57 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
 }
 
+// handleSendMyEmailCode 向「新邮箱」发送自助改绑验证码（R7-01）。
+// 仅登录用户可用，供 handleUpdateMe 改邮箱时的所有权验证；管理员改他人邮箱不经过此接口。
+func (s *Server) handleSendMyEmailCode(c *gin.Context) {
+	claims := currentClaims(c)
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := readJSON(c, &req); err != nil {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" || !strings.Contains(req.Email, "@") {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱格式不正确"})
+		return
+	}
+	if !auth.SMTPEnabled(s.DB) || !auth.SMTPConfigured(s.DB) {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "未配置邮件服务，无法发送验证码"})
+		return
+	}
+	// 已被其他账号占用的邮箱直接拒绝：省去一次发信，也避免骚扰该邮箱的主人。
+	var used int
+	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if used > 0 {
+		writeJSON(c, http.StatusConflict, gin.H{"error": "该邮箱已被其他账号使用"})
+		return
+	}
+	// 邮箱维度限流：防止登录用户把本接口当作发信轰炸器。
+	if !s.sendCodeEmail.Allow(strings.ToLower(req.Email)) {
+		writeJSON(c, http.StatusTooManyRequests, gin.H{"error": "验证码发送过于频繁，请稍后再试"})
+		return
+	}
+	if err := auth.SendVerifyCode(s.DB, s.EncKey, req.Email, "bind_email"); err != nil {
+		// 原始 SMTP 错误仅进审计日志（管理员可见），对外返回通用文案。
+		log.LogAction(s.DB, claims.UserID, claims.Username, "send_bind_email_code_failed", "发送改绑邮箱验证码失败: "+err.Error(), clientIP(c))
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "验证码发送失败，请稍后重试"})
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
+}
+
 // handleUpdateMe 用户修改自己的用户名、邮箱与密码。
 func (s *Server) handleUpdateMe(c *gin.Context) {
 	claims := currentClaims(c)
 	var req struct {
 		Username        string `json:"username"`
 		Email           string `json:"email"`
+		EmailCode       string `json:"email_code"`
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 		KdfSalt         string `json:"kdf_salt"`
@@ -1193,11 +1567,18 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	req.Email = strings.TrimSpace(req.Email)
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
 		username = claims.Username
 	}
 	if username != claims.Username {
+		// 保留名校验：与 handleCreateUser / handleUpdateUser / handleImportUsers 保持一致，
+		// 避免用户经自助改名绕过"用户名即角色"的纵深防御。
+		if isReservedUsername(username) {
+			writeJSON(c, http.StatusBadRequest, gin.H{"error": "该用户名为系统保留名，不可使用"})
+			return
+		}
 		var exists int
 		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE username = ? AND id != ?`, username, claims.UserID).Scan(&exists); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -1207,6 +1588,23 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 			writeJSON(c, http.StatusConflict, gin.H{"error": "用户名已存在"})
 			return
 		}
+	}
+	// 账号身份凭证变更再验证（修复账号接管链）：用户名/邮箱与口令同属账号身份，
+	// 任何一项实际变更都要求当前密码。否则持有泄露令牌的攻击者可先改绑自己的
+	// 邮箱，再经「邮箱重置口令」闭环完成持久接管——改密会验证旧口令，唯独改
+	// 邮箱/用户名不验，防护不对称。
+	var currentHash, currentEmail string
+	if err := s.DB.QueryRow(`SELECT password_hash, COALESCE(email, '') FROM users WHERE id = ?`, claims.UserID).Scan(&currentHash, &currentEmail); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	usernameChanged := username != claims.Username
+	// 邮箱留空表示"不修改"：仅当提交了非空且与当前值不同的邮箱时才算变更，
+	// 避免改密/改名请求未携带 email 时把邮箱误清空。
+	emailChanged := req.Email != "" && req.Email != currentEmail
+	effectiveEmail := currentEmail
+	if req.Email != "" {
+		effectiveEmail = req.Email
 	}
 	if req.NewPassword != "" {
 		// 超级管理员账号沿用更严的口令要求（长度 + 复杂度）。
@@ -1220,13 +1618,33 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		var hash string
-		if err := s.DB.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, claims.UserID).Scan(&hash); err != nil {
+	}
+	if req.NewPassword != "" || usernameChanged || emailChanged {
+		if !auth.CheckPassword(currentHash, req.CurrentPassword) {
+			writeJSON(c, http.StatusBadRequest, gin.H{"error": "当前密码错误"})
+			return
+		}
+	}
+
+	// 邮箱改绑的所有权验证（R7-01）：自助改邮箱必须提供发送到**新邮箱**的验证码，
+	// 防止用户把账号邮箱指向他人地址（进而引发登录歧义与重置串扰）。
+	// 管理员经用户管理改邮箱不走此校验（见 handleUpdateUser）。
+	if emailChanged {
+		if req.Email == "" || !strings.Contains(req.Email, "@") {
+			writeJSON(c, http.StatusBadRequest, gin.H{"error": "邮箱格式不正确"})
+			return
+		}
+		if !auth.CheckVerification(s.DB, req.Email, req.EmailCode, "bind_email") {
+			writeJSON(c, http.StatusBadRequest, gin.H{"error": "新邮箱验证码错误或已过期"})
+			return
+		}
+		var used int
+		if err := s.DB.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ? AND id != ?`, req.Email, claims.UserID).Scan(&used); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
-		if !auth.CheckPassword(hash, req.CurrentPassword) {
-			writeJSON(c, http.StatusBadRequest, gin.H{"error": "当前密码错误"})
+		if used > 0 {
+			writeJSON(c, http.StatusConflict, gin.H{"error": "该邮箱已被其他账号使用"})
 			return
 		}
 	}
@@ -1264,12 +1682,12 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 		}
 		// 改密同时递增令牌版本：旧令牌全部失效（PT-06）。本次会话在提交后
 		// 重新签发（见函数末尾），避免用户刚改完密码就被登出。
-		if _, err := tx.Exec(`UPDATE users SET username=?, email=?, password_hash=?, token_version = COALESCE(token_version, 0) + 1 WHERE id=?`, username, req.Email, newHash, claims.UserID); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET username=?, email=?, password_hash=?, token_version = COALESCE(token_version, 0) + 1 WHERE id=?`, username, effectiveEmail, newHash, claims.UserID); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
 	} else {
-		if _, err := tx.Exec(`UPDATE users SET username=?, email=? WHERE id=?`, username, req.Email, claims.UserID); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET username=?, email=? WHERE id=?`, username, effectiveEmail, claims.UserID); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
@@ -1307,7 +1725,7 @@ func (s *Server) handleUpdateMe(c *gin.Context) {
 
 // listEntriesAll 返回该用户的全部条目（含墓碑），用于同步 vault 上传/下载。
 func (s *Server) listEntriesAll(userID int64) ([]db.Entry, error) {
-	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned FROM entries WHERE user_id = ? ORDER BY pinned DESC, sort_order ASC, id ASC`, userID)
+	rows, err := s.DB.Query(`SELECT id, uuid, sort_order, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned, revision FROM entries WHERE user_id = ? ORDER BY pinned DESC, sort_order ASC, id ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1318,7 +1736,7 @@ func (s *Server) listEntriesAll(userID int64) ([]db.Entry, error) {
 		var pwEnc, notesEnc string
 		var deleted int
 		var pinned bool
-		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned); err != nil {
+		if err := rows.Scan(&e.ID, &e.UUID, &e.SortOrder, &e.Title, &e.Username, &e.URL, &e.Category, &pwEnc, &notesEnc, &e.CreatedAt, &e.UpdatedAt, &deleted, &pinned, &e.Revision); err != nil {
 			return nil, err
 		}
 		e.Pinned = &pinned
@@ -1348,19 +1766,36 @@ func (s *Server) replaceEntries(userID int64, list []db.Entry) error {
 	// 读取既有置顶状态（uuid 与 id 两个维度），用于「上传载荷未携带 pinned」的
 	// 条目保留原状态（典型：关闭置顶同步的桌面端按设备上传）。
 	storedPins := make(map[string]bool)
-	rows, err := s.DB.Query(`SELECT uuid, id, pinned FROM entries WHERE user_id = ? AND pinned = 1`, userID)
+	// 同时读取服务端当前 revision，用于本次写入时单调递增（见下方 revision 计算）。
+	storedRev := make(map[string]int64)
+	rows, err := s.DB.Query(`SELECT uuid, id, pinned, revision FROM entries WHERE user_id = ?`, userID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var u string
 		var id, p int
-		if err := rows.Scan(&u, &id, &p); err == nil && p == 1 {
+		var rev int64
+		if err := rows.Scan(&u, &id, &p, &rev); err != nil {
+			// 不静默忽略：Scan 失败会让 storedRev 缺项，导致本次写入的 revision 被
+			// 退化为 1（版本号异常）。此处直接中止，避免把损坏的状态写回去。
+			rows.Close()
+			return err
+		}
+		if p == 1 {
 			if u != "" {
 				storedPins["u:"+u] = true
 			}
 			storedPins["i:"+strconv.Itoa(id)] = true
 		}
+		if u != "" {
+			storedRev["u:"+u] = rev
+		}
+		storedRev["i:"+strconv.Itoa(id)] = rev
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	tx, err := s.DB.Begin()
@@ -1423,8 +1858,21 @@ func (s *Server) replaceEntries(userID int64, list []db.Entry) error {
 			}
 			pinned = storedPins[key]
 		}
-		_, err = tx.Exec(`INSERT INTO entries (id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			e.ID, e.UUID, e.SortOrder, userID, e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.CreatedAt, e.UpdatedAt, deleted, pinned)
+		// revision：服务端每次写入整库时单调 +1。
+		//
+		// 安全要点（PT：客户端可控 revision）：**绝不能把客户端传入的 revision 当作
+		// 基线参与 max 计算**。整库上传下每条条目每次都会被重写，若采纳客户端数值，
+		// 任何持有旧副本的一方只要把 revision 填成极大值（如 1e9），就能：
+		//   ① 让陈旧数据在下次合并时"看起来更新"从而覆盖服务端新数据（丢写）；
+		//   ② 把该条目的 revision 永久抬高，使其他设备的真实修改全部被判为"旧"而丢弃。
+		// 因此 revision 严格由服务端既有值推导，客户端数值一律忽略。
+		revKey := "u:" + e.UUID
+		if e.UUID == "" {
+			revKey = "i:" + strconv.FormatInt(e.ID, 10)
+		}
+		revision := storedRev[revKey] + 1
+		_, err = tx.Exec(`INSERT INTO entries (id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned, revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.UUID, e.SortOrder, userID, e.Title, e.Username, e.URL, e.Category, pwEnc, notesEnc, e.CreatedAt, e.UpdatedAt, deleted, pinned, revision)
 		if err != nil {
 			_ = tx.Rollback()
 			// 主键 (user_id,id) 与唯一索引 (user_id,uuid) 均在上面去重过，
@@ -1473,7 +1921,10 @@ func (s *Server) handleSendRegisterCode(c *gin.Context) {
 		return
 	}
 	if err := auth.SendVerifyCode(s.DB, s.EncKey, req.Email, "register"); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// 原始 SMTP 错误仅记入审计日志（管理员可见，用于排查发信配置）；
+		// 对外返回通用文案，避免向未认证请求者泄露内部 SMTP 主机/端口/连通性。
+		log.LogAction(s.DB, 0, req.Email, "send_register_code_failed", "发送注册验证码失败: "+err.Error(), clientIP(c))
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "验证码发送失败，请稍后重试"})
 		return
 	}
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
@@ -1544,14 +1995,20 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "hash error"})
 		return
 	}
-	// 邮件重置口令同样递增令牌版本：重置前泄露的令牌立即失效（PT-06）。
-	res, err := s.DB.Exec(`UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE email = ?`, hash, req.Email)
-	if err != nil {
+	// 先解析唯一目标账号，再按 id 定向更新（R7-01）：原 `UPDATE ... WHERE email = ?`
+	// 在邮箱非唯一时会对多个账号批量改密（跨账号串扰）。邮箱现已唯一，按 id 更新更明确。
+	var targetID int64
+	if err := s.DB.QueryRow(`SELECT id FROM users WHERE email = ?`, req.Email).Scan(&targetID); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(c, http.StatusNotFound, gin.H{"error": "该邮箱未注册"})
+			return
+		}
 		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(c, http.StatusNotFound, gin.H{"error": "该邮箱未注册"})
+	// 邮件重置口令同样递增令牌版本：重置前泄露的令牌立即失效（PT-06）。
+	if _, err := s.DB.Exec(`UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?`, hash, targetID); err != nil {
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	log.LogAction(s.DB, 0, req.Email, "reset_password", "重置密码", clientIP(c))
@@ -1573,8 +2030,16 @@ func (s *Server) handlePublicSettings(c *gin.Context) {
 
 // handleGetSettings 返回系统设置（SMTP 配置 + 邮箱验证模式 + 站点信息）。
 func (s *Server) handleGetSettings(c *gin.Context) {
+	smtp := auth.LoadSMTPConfig(s.DB, s.EncKey)
+	// SMTP 口令不以明文回传（R6-02）：管理员会话被接管时，明文口令会被直接读走，
+	// 而该口令常与主邮箱同口令，危害外溢。与导出接口（handleExportSettings）对齐，
+	// 已配置时返回掩码 auth.MaskedSecret；未配置时保持空串（前端占位提示依赖空值）。
+	// 掩码值在 handleUpdateSettings 中被识别为"保持原值"，故前端"原样回传"不会破坏口令。
+	if smtp.Password != "" {
+		smtp.Password = auth.MaskedSecret
+	}
 	writeJSON(c, http.StatusOK, gin.H{
-		"smtp":                     auth.LoadSMTPConfig(s.DB, s.EncKey),
+		"smtp":                     smtp,
 		"smtp_enabled":             auth.SMTPEnabled(s.DB),
 		"email_verify_mode":        auth.EmailVerifyMode(s.DB),
 		"allow_registration":       db.GetMeta(s.DB, "allow_registration") == "true",
@@ -1610,12 +2075,20 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 		writeJSON(c, http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	// 逐项写入并收集失败：任何一项落库失败都不能再回 {"status":"ok"}，
+	// 否则管理员会看到"保存成功"但 SMTP/注册开关等静默未生效（磁盘满、库只读、并发写锁）。
+	var failed []string
+	set := func(key, value string) {
+		if err := db.SetMeta(s.DB, key, value); err != nil {
+			failed = append(failed, key)
+		}
+	}
 	if req.Mode != "" {
 		if req.Mode != "code" && req.Mode != "link" && req.Mode != "none" {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": "mode 必须为 code/link/none"})
 			return
 		}
-		_ = db.SetMeta(s.DB, "email_verify_mode", req.Mode)
+		set("email_verify_mode", req.Mode)
 	}
 	allowedVendor := map[string]bool{
 		"qq": true, "126": true, "163": true, "gmail": true, "outlook": true, "custom": true,
@@ -1625,12 +2098,14 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 			writeJSON(c, http.StatusBadRequest, gin.H{"error": "vendor 非法"})
 			return
 		}
-		_ = db.SetMeta(s.DB, "smtp_vendor", req.Vendor)
+		set("smtp_vendor", req.Vendor)
 	}
-	_ = db.SetMeta(s.DB, "smtp_host", req.Host)
-	_ = db.SetMeta(s.DB, "smtp_port", strconv.Itoa(req.Port))
-	_ = db.SetMeta(s.DB, "smtp_username", req.Username)
-	_ = db.SetMeta(s.DB, "smtp_from", req.From)
+	set("smtp_host", req.Host)
+	// 端口与数值型设置做范围钳制：管理员（或托管了管理员会话的攻击者）写入
+	// 负数/超大值会导致 SMTP 不可用、口令策略无法满足、回收站永不清理。
+	set("smtp_port", strconv.Itoa(clampRange(req.Port, 1, 65535, 465)))
+	set("smtp_username", req.Username)
+	set("smtp_from", req.From)
 	// SMTP 口令加密后落库（PT-07）；掩码值表示"保持原口令不变"。
 	if req.Password != "" && req.Password != auth.MaskedSecret {
 		enc, err := auth.EncryptSMTPPassword(s.EncKey, req.Password)
@@ -1638,49 +2113,56 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "保存 SMTP 口令失败"})
 			return
 		}
-		_ = db.SetMeta(s.DB, "smtp_password", enc)
+		set("smtp_password", enc)
 	}
 	if req.SSL {
-		_ = db.SetMeta(s.DB, "smtp_ssl", "true")
+		set("smtp_ssl", "true")
 	} else {
-		_ = db.SetMeta(s.DB, "smtp_ssl", "false")
+		set("smtp_ssl", "false")
 	}
 	if req.SMTPEnabled != nil {
 		if *req.SMTPEnabled {
-			_ = db.SetMeta(s.DB, "smtp_enabled", "true")
+			set("smtp_enabled", "true")
 		} else {
-			_ = db.SetMeta(s.DB, "smtp_enabled", "false")
+			set("smtp_enabled", "false")
 		}
 	}
 	if req.AllowRegistration != nil {
 		if *req.AllowRegistration {
-			_ = db.SetMeta(s.DB, "allow_registration", "true")
+			set("allow_registration", "true")
 		} else {
-			_ = db.SetMeta(s.DB, "allow_registration", "false")
+			set("allow_registration", "false")
 		}
 	}
 	if req.PasswordMinLength > 0 {
-		_ = db.SetMeta(s.DB, "password_min_length", strconv.Itoa(req.PasswordMinLength))
+		set("password_min_length", strconv.Itoa(clampRange(req.PasswordMinLength, 6, 128, 8)))
 	}
 	if req.PasswordRequireComplex != nil {
 		if *req.PasswordRequireComplex {
-			_ = db.SetMeta(s.DB, "password_require_complex", "true")
+			set("password_require_complex", "true")
 		} else {
-			_ = db.SetMeta(s.DB, "password_require_complex", "false")
+			set("password_require_complex", "false")
 		}
 	}
 	if req.Recycle != nil {
 		if *req.Recycle {
-			_ = db.SetMeta(s.DB, "recycle", "true")
+			set("recycle", "true")
 		} else {
-			_ = db.SetMeta(s.DB, "recycle", "false")
+			set("recycle", "false")
 		}
 	}
 	if req.RecycleDays > 0 {
-		_ = db.SetMeta(s.DB, "recycle_days", strconv.Itoa(req.RecycleDays))
+		set("recycle_days", strconv.Itoa(clampRange(req.RecycleDays, 1, 3650, 30)))
 	}
 	if req.Site != nil {
-		_ = db.SetMeta(s.DB, "site_footer_text", req.Site.FooterText)
+		set("site_footer_text", req.Site.FooterText)
+	}
+	if len(failed) > 0 {
+		writeJSON(c, http.StatusInternalServerError, gin.H{
+			"error":  "部分设置保存失败",
+			"failed": failed,
+		})
+		return
 	}
 	log.LogAction(s.DB, claims.UserID, claims.Username, "config_update", "更新系统设置", clientIP(c))
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
@@ -1700,7 +2182,11 @@ func (s *Server) handleTestEmail(c *gin.Context) {
 		return
 	}
 	if err := auth.SendHTMLEmail(s.DB, s.EncKey, req.Email, "密匣 CryPtBox 测试邮件", auth.TestEmailHTML()); err != nil {
-		writeJSON(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// 原始 SMTP 错误仅进审计日志（管理员可见，便于排查配置），对外返回通用文案，
+		// 避免泄露 SMTP 主机/端口/连通性等基础设施细节（R7-03）。与注册发码路径一致。
+		claims := currentClaims(c)
+		log.LogAction(s.DB, claims.UserID, claims.Username, "test_email_failed", "测试邮件发送失败: "+err.Error(), clientIP(c))
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "测试邮件发送失败，请检查 SMTP 配置或查看审计日志"})
 		return
 	}
 	writeJSON(c, http.StatusOK, gin.H{"status": "ok"})
@@ -1776,6 +2262,31 @@ func clampIntMeta(key, v string) string {
 	return strconv.Itoa(n)
 }
 
+// clampRange 把 value 钳制到 [lo, hi]；value <= 0（未提供/非法）时回退到 def。
+func clampRange(value, lo, hi, def int) int {
+	if value <= 0 {
+		return def
+	}
+	if value < lo {
+		return lo
+	}
+	if value > hi {
+		return hi
+	}
+	return value
+}
+
+// clampPortMeta 把导入件里的 smtp_port 钳制到合法区间；非法（非数字）返回空串表示"跳过该项"。
+// R8-04：更新路径（handleUpdateSettings）已对端口做 clampRange，导入路径此前遗漏——
+// 导入 0/负数/超范围端口会让 SMTP 静默失效（界面仍显示"已启用"）。
+func clampPortMeta(v string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return ""
+	}
+	return strconv.Itoa(clampRange(n, 1, 65535, 465))
+}
+
 // handleImportSettings 导入系统配置（仅写入白名单内的 meta 键值，密钥类字段永不可覆盖）。
 func (s *Server) handleImportSettings(c *gin.Context) {
 	var req struct {
@@ -1802,6 +2313,23 @@ func (s *Server) handleImportSettings(c *gin.Context) {
 			if v == "" {
 				continue
 			}
+		}
+		// R8-04：端口同样要钳制，否则导入 0/负数/超范围值会让 SMTP 静默失效。
+		if k == "smtp_port" {
+			v = clampPortMeta(v)
+			if v == "" {
+				continue
+			}
+		}
+		// PT-07：SMTP 口令必须加密后落库。导出文件里通常是掩码或明文，两条分支都不能
+		// 直接 SetMeta —— 否则明文口令会写进 meta 表，破坏既定的密钥治理。
+		if k == "smtp_password" {
+			enc, err := auth.EncryptSMTPPassword(s.EncKey, v)
+			if err != nil {
+				writeJSON(c, http.StatusInternalServerError, gin.H{"error": "导入 SMTP 口令失败"})
+				return
+			}
+			v = enc
 		}
 		if err := db.SetMeta(s.DB, k, v); err != nil {
 			writeJSON(c, http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -1840,6 +2368,23 @@ func clientIP(c *gin.Context) string {
 	return log.ClientIP(c.Request)
 }
 
+// loginLockKey 组合「来源 IP + 账号」作为登录失败锁定的键。
+//
+// 为什么要带来源维度：若只用账号名，任何人用少量错误密码即可把目标账号
+// 全局锁定（账号锁定 DoS，R6-01）——受害者从自己的 IP、用正确密码也被拒。
+// 带上来源后，锁定只作用于发起失败尝试的那个来源，攻击者无法波及他人。
+//
+// 部署依赖：来源 IP 取自 log.ClientIP，它仅在 `TRUST_PROXY=true` 时采信
+// X-Forwarded-For / X-Real-IP；否则用 TCP 对端地址。**若服务置于飞牛网关等
+// 反向代理之后而又未开启 TRUST_PROXY，则所有请求的 IP 会退化为同一个
+// （网关地址），本维度失效、退回到近似的账号全局锁定。** 网关部署务必
+// 设置 TRUST_PROXY=true（且仅信任可信网关写入的转发头）。
+//
+// 注意：账号部分统一转小写（用户名不区分大小写）。
+func loginLockKey(ip, login string) string {
+	return strings.ToLower(strings.TrimSpace(ip)) + "|" + strings.ToLower(strings.TrimSpace(login))
+}
+
 // ---- 头像 ----
 
 func avatarDir() string {
@@ -1853,6 +2398,16 @@ func findAvatar(userID int64) string {
 		return matches[0]
 	}
 	return ""
+}
+
+// removeAvatarFiles 删除该用户的全部头像文件。
+// 用户 id 会被回收复用（FindNextUserID），头像不随账号一并删除的话，
+// 残留文件会被分配到同一 id 的新用户「继承」展示，构成跨用户信息残留。
+func removeAvatarFiles(userID int64) {
+	matches, _ := filepath.Glob(filepath.Join(avatarDir(), strconv.FormatInt(userID, 10)+".*"))
+	for _, m := range matches {
+		_ = os.Remove(m)
+	}
 }
 
 // avatarName 返回用户头像文件名（如 1.png），无头像返回空字符串。

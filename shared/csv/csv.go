@@ -246,12 +246,19 @@ func ParseTXTEntries(data []byte) ([]db.Entry, error) {
 			}
 			continue
 		}
+		// 分隔符可能是半角 ':'（1 字节）或全角 '：'（3 字节）。必须按分隔符的实际字节
+		// 长度推进，否则 line[idx+1:] 会切在全角字符中间，产出带孤立后继字节的乱码值
+		// （Go 按字节切片不会 panic，因此是"静默数据损坏"：导入的标题/口令被污染）。
 		idx := strings.IndexAny(line, ":：")
 		if idx < 0 {
 			continue
 		}
+		sepLen := 1
+		if !strings.HasPrefix(line[idx:], ":") {
+			sepLen = len("：") // 全角冒号
+		}
 		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
+		val := strings.TrimSpace(line[idx+sepLen:])
 		field := matchField(key)
 		switch field {
 		case "title":

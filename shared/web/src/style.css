@@ -91,6 +91,18 @@ select:focus {
   color: #16a34a;
 }
 
+/* 管理侧过渡期提示（如未迁移 legacy 旧数据）：浅色强调、不阻断操作 */
+.notice-warn {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 /* 手机端基础样式：放大字体与点击区域，避免 iOS 聚焦缩放 */
 @media (max-width: 640px) {
   body {
@@ -134,4 +146,9 @@ html[data-theme='dark'] .error {
 }
 html[data-theme='dark'] .msg {
   color: #4ade80;
+}
+html[data-theme='dark'] .notice-warn {
+  background: #422006;
+  border-color: #b45309;
+  color: #fcd34d;
 }

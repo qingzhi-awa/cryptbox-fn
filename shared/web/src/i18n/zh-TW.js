@@ -24,6 +24,7 @@ export default {
     save: '儲存'
   },
   users: {
+    legacyPending: '偵測到 {n} 個帳號仍存在伺服器可解密的舊資料（未完成遷移），請在 {v} 版本前登入客戶端完成遷移。',
     add: '新增使用者',
     username: '使用者名稱',
     email: '電子郵件',
@@ -49,6 +50,12 @@ export default {
     currentPassword: '目前密碼',
     newPassword: '新密碼',
     changeAvatar: '更換頭像',
+    emailCode: '郵箱驗證碼',
+    emailCodeRequired: '請先取得並填寫新郵箱驗證碼',
+    currentPasswordRequired: '請填寫目前密碼',
+    sendCode: '發送驗證碼',
+    sending: '發送中…',
+    codeSent: '驗證碼已發送，請查收郵件',
     edit: '編輯個人資訊'
   },
   msg: {

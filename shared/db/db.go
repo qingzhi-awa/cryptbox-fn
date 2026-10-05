@@ -3,10 +3,13 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -18,6 +21,13 @@ import (
 	"github.com/qingzhi-awa/cryptbox/shared/config"
 	"github.com/qingzhi-awa/cryptbox/shared/uuid"
 )
+
+// userIDRetryBase 覆盖 CreateUserWithNextID 的重试次数上限，仅用于测试（默认 0 = 使用
+// 生产值）。并发用例把退避压到毫秒级会造成较大绝对耗时，通过它把尝试次数调小。
+var userIDRetryBase int
+
+// SetUserIDRetryBaseForTest 调整 CreateUserWithNextID 的重试次数上限（仅供测试使用）。
+func SetUserIDRetryBaseForTest(n int) { userIDRetryBase = n }
 
 // Entry 密码条目（解密后的领域模型）。
 //
@@ -44,6 +54,13 @@ type Entry struct {
 	//     使桌面端按设备的置顶不被上传覆盖。
 	// 出库（GET /api/vault）时始终为具体布尔值，便于各端直接使用。
 	Pinned *bool `json:"pinned,omitempty"`
+	// Revision 服务端单调递增的**整库写入序号**，由服务端全权维护。
+	// 每次 PUT /api/vault 重写整库时 +1，与条目内容是否变化无关。
+	//
+	// 安全约束：**客户端提交的 revision 一律被忽略**。若采纳客户端数值，
+	// 持有旧副本的一方只需填入极大值即可让陈旧数据在合并中"胜出"覆盖新数据，
+	// 并把该条目的 revision 永久抬高、压制其他设备的真实修改（见 replaceEntries）。
+	Revision int64 `json:"revision"`
 }
 
 // User 用户信息。
@@ -154,7 +171,7 @@ func MigrateAt(database *sql.DB, dbPath string) error {
 
 // migrateEntryUUIDs 确保 entries.uuid 唯一索引存在，并为存量空 uuid 回填确定性标识（PT-04）。
 //
-// 唯一索引为**部分索引**（WHERE uuid <> ''）：空值表示"旧版协议写入、待分配"，
+// 唯一索引为**部分索引**（WHERE uuid <> ”）：空值表示"旧版协议写入、待分配"，
 // 不参与唯一性约束。
 func migrateEntryUUIDs(db *sql.DB) error {
 	const idxSQL = `CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_user_uuid ON entries(user_id, uuid) WHERE uuid <> ''`
@@ -253,6 +270,7 @@ func migrateSchema(db *sql.DB) error {
 			updated_at VARCHAR(64) NOT NULL,
 			deleted INTEGER NOT NULL DEFAULT 0,
 			pinned INTEGER NOT NULL DEFAULT 0,
+			revision INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS meta (
@@ -312,6 +330,11 @@ func migrateSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "entries", "pinned", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// 兼容旧库：为已存在的 entries 表补充 revision 写入版本列。
+	// 多端合并时优先按 revision 裁决冲突（其次才比 updated_at），摆脱对各端本地时钟的依赖。
+	if err := ensureColumn(db, "entries", "revision", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	// 兼容旧库：为已存在的 users 表补充 pin_sync 列（按账号的「置顶参与同步」开关）。
 	if err := ensureColumn(db, "users", "pin_sync", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
@@ -336,7 +359,40 @@ func migrateSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "entries", "uuid", "VARCHAR(64) NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// 邮箱唯一化（R7-01）：非空邮箱是账号恢复边界的唯一锚点，必须唯一。
+	// 旧库可能已存在重复邮箱（历史缺陷遗留），此时记录告警并跳过建索引，
+	// 绝不因建索引失败而阻止服务启动（否则升级即宕机）。
+	if err := ensureUniqueEmailIndex(db); err != nil {
+		log.Printf("警告：users.email 唯一索引未建立：%v", err)
+	}
 	return nil
+}
+
+// ensureUniqueEmailIndex 为 users.email 建立部分唯一索引（非空时唯一）。
+//
+// 若库中已存在重复的非空邮箱，会拒绝建索引并返回错误（列出重复值），
+// 交由管理员归并后再重启生效——避免"静默改写/删除"已有账号数据。
+func ensureUniqueEmailIndex(db *sql.DB) error {
+	rows, err := db.Query(`SELECT email, COUNT(1) FROM users WHERE email <> '' GROUP BY email HAVING COUNT(1) > 1`)
+	if err != nil {
+		return err
+	}
+	var dups []string
+	for rows.Next() {
+		var email string
+		var n int
+		if err := rows.Scan(&email, &n); err != nil {
+			rows.Close()
+			return err
+		}
+		dups = append(dups, email)
+	}
+	rows.Close()
+	if len(dups) > 0 {
+		return fmt.Errorf("存在 %d 个被多个账号占用的邮箱，请先归并：%s", len(dups), strings.Join(dups, ", "))
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email <> ''`)
+	return err
 }
 
 // ensureSortOrder 为 entries 表补充 sort_order 序号列（若缺失），并按 id 顺序初始化旧数据。
@@ -432,13 +488,14 @@ func migrateEntriesCompositePK(db *sql.DB, dbPath string) error {
 			updated_at VARCHAR(64) NOT NULL,
 			deleted INTEGER NOT NULL DEFAULT 0,
 			pinned INTEGER NOT NULL DEFAULT 0,
+			revision INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, id)
 		)`,
 		// OR IGNORE：兜住历史脏数据中可能存在的 (user_id,id) 重复行，
 		// 避免升级过程因个别脏数据整体失败。
 		`INSERT OR IGNORE INTO entries_pk_new
-			(id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned)
-		 SELECT id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned FROM entries`,
+			(id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned, revision)
+		 SELECT id, uuid, sort_order, user_id, title, username, url, category, password_enc, notes_enc, created_at, updated_at, deleted, pinned, revision FROM entries`,
 		`DROP TABLE entries`,
 		`ALTER TABLE entries_pk_new RENAME TO entries`,
 		`CREATE INDEX IF NOT EXISTS idx_entries_user_id ON entries(user_id)`,
@@ -559,7 +616,8 @@ func ensureColumn(db *sql.DB, table, column, def string) error {
 }
 
 // columnExists 检查表中是否存在指定列。
-func columnExists(db *sql.DB, table, column string) (bool, error) {	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return false, err
 	}
@@ -590,6 +648,10 @@ func tableExists(db *sql.DB, table string) (bool, error) {
 }
 
 // FindNextUserID 返回当前最小可用的用户 ID，用于删除用户后回收复用 ID。
+//
+// 注意：本函数只做一次普通 SELECT，**不持有锁、也不在事务内**。因此它返回的编号
+// 在并发场景下可能立刻被其他写入者占用——直接拿它去 INSERT 会偶发主键冲突。
+// 需要「计算编号 + 写入」原子完成的调用方，请改用 CreateUserWithNextID。
 func FindNextUserID(db *sql.DB) (int64, error) {
 	rows, err := db.Query(`SELECT id FROM users ORDER BY id`)
 	if err != nil {
@@ -610,10 +672,120 @@ func FindNextUserID(db *sql.DB) (int64, error) {
 	return expected, rows.Err()
 }
 
-// SeedAdmin 不再创建默认账号；仅兼容旧库：将历史 admin 账号的 role 升级为 superadmin。
+// ErrUsernameTaken 表示用户名已被占用（业务冲突，非并发 id 竞争）。
+// 调用方应据此返回 409，而不是重试。
+var ErrUsernameTaken = errors.New("用户名已存在")
+
+// CreateUserWithNextID 原子地完成「挑选下一个可用 id + 插入用户」，消除
+// FindNextUserID 与 INSERT 之间的 TOCTOU 竞争。
+//
+// 背景：FindNextUserID 是普通 SELECT，两个并发请求（典型的：两个用户几乎同时点
+// 「注册」，或攻击者对未认证的 /api/register 并发刷请求）会算出同一个编号，随后
+// 一个 INSERT 成功、另一个因主键冲突返回 500 —— 对合法用户表现为"注册偶发失败"，
+// 批量导入时还会中途中断（部分导入）。
+//
+// 修复方式：在事务外做「计算编号 → INSERT」，冲突时**随机退避后重算重试**。SQLite
+// 写事务会串行化，但 SELECT 快照可能过期，因此冲突本身是正常现象而非错误；users.id
+// 由本函数显式提供（而非依赖 AUTOINCREMENT），必须保证编号唯一，所以这里靠"插入失败
+// 即重试 + 随机退避"来保证正确性与收敛性，最多重试 maxRetries 次。
+// 退避必须是随机的：若所有竞争者在同一时刻重算，会读到同一快照、算出同一编号而活锁。
+func CreateUserWithNextID(db *sql.DB, username, passwordHash, role, email, kdfSalt, vaultKeyEnc string) (int64, error) {
+	maxRetries := 64
+	if base := userIDRetryBase; base > 0 {
+		// 让单测可以把退避压到极小值，避免并发用例耗时过长。
+		maxRetries = base
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		id, err := FindNextUserID(db)
+		if err != nil {
+			return 0, err
+		}
+		// 用 OR IGNORE 之外的方式判断冲突：直接 INSERT，冲突时 SQLite 返回约束错误。
+		// 这里通过 users.id 的唯一性（PRIMARY KEY）来判定，而不是先查后插。
+		_, err = db.Exec(`INSERT INTO users (id, username, password_hash, role, status, email, vault_key_enc, kdf_salt) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
+			id, username, passwordHash, role, email, vaultKeyEnc, kdfSalt)
+		if err == nil {
+			return id, nil
+		}
+		// 关键区分：只有 users.id 的主键冲突才值得重试（说明并发者有抢先占了该编号）。
+		// users.username 的唯一约束冲突是**业务错误**，重试多少次都会失败，必须立即
+		// 返回 ErrUsernameTaken 让上层给出 409；否则会被伪装成"重试耗尽"的 500，
+		// 还会白白占用 64 次随机退避的阻塞时间。
+		if isUsernameTakenErr(err) {
+			return 0, ErrUsernameTaken
+		}
+		if !isIDConflictErr(err) {
+			return 0, err
+		}
+		lastErr = err
+		// 关键：冲突后必须等待一小段随机时间再重算。否则 N 个 goroutine 会在同一时刻
+		// 读到同一份快照、算出同一个 id，形成活锁（重试再多次也会全部扑在同一编号上）。
+		// 随机化让竞争者在时间上散开，从而在有限次内收敛。
+		time.Sleep(time.Duration(1+rand.Intn(1+attempt*2)) * time.Millisecond)
+	}
+	return 0, fmt.Errorf("创建用户失败：并发冲突重试次数已用尽: %w", lastErr)
+}
+
+// sqliteUniqueErrRe 匹配 modernc.org/sqlite 的唯一/主键冲突错误串，捕获冲突列名。
+var sqliteUniqueErrRe = regexp.MustCompile(`unique constraint failed:\s*([a-z_]+)\.([a-z_]+)`)
+
+// isUsernameTakenErr 判断错误是否为 users.username（或其他非 id 唯一列）冲突。
+func isUsernameTakenErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if m := sqliteUniqueErrRe.FindStringSubmatch(strings.ToLower(err.Error())); m != nil {
+		// 形如 "unique constraint failed: users.username"
+		return m[2] != "id"
+	}
+	return false
+}
+
+// isIDConflictErr 判断错误是否确切为 users.id 主键冲突（只有这种情况才重试）。
+//
+// 注意：SQLite 对任意唯一约束都返回 "... UNIQUE constraint failed: <表>.<列>"，
+// 因此早期用泛化的 "constraint failed" 做匹配会把用户名冲突也吞进重试路径。
+// 这里改为**必须命中具体的 "users.id"**，避免误判。
+func isIDConflictErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if m := sqliteUniqueErrRe.FindStringSubmatch(s); m != nil {
+		return m[1] == "users" && m[2] == "id"
+	}
+	// 兼容部分驱动/平台的措辞：显式主键冲突。
+	return strings.Contains(s, "primary key") || strings.Contains(s, "users.id")
+}
+
+// SeedAdmin 历史兼容迁移：把旧库里名为 admin 的普通管理员升级为 superadmin。
+//
+// 安全背景（重要）：早期实现**每次启动**无条件执行
+// `UPDATE users SET role='superadmin' WHERE username='admin' AND role='admin'`。
+// 由于 handleCreateUser / handleUpdateUser 允许管理员创建或改名出一个
+// username="admin" 且 role="admin" 的账号，任一**普通**管理员都能借此在下一次重启后
+// 被静默提升为 superadmin —— 一次垂直权限提升。等价于把「重启」变成提权触发器。
+//
+// 修复：改为**一次性、带版本守卫**的迁移，且仅在「全库尚无任何 superadmin」时才执行
+// （真正的旧库升级场景）。迁移完成后写入标记，之后永不重跑；已存在 superadmin 时直接
+// 写标记跳过，从而彻底切断该提权链。
 func SeedAdmin(db *sql.DB) error {
-	_, err := db.Exec(`UPDATE users SET role = 'superadmin' WHERE username = 'admin' AND role = 'admin'`)
-	return err
+	const seedAdminKey = "seed_admin_migrated"
+	if GetMeta(db, seedAdminKey) == "1" {
+		return nil
+	}
+	var superCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM users WHERE role = 'superadmin'`).Scan(&superCount); err != nil {
+		return err
+	}
+	// 已存在 superadmin：属于新版库或已完成升级，不再做任何角色改写。
+	if superCount == 0 {
+		if _, err := db.Exec(`UPDATE users SET role = 'superadmin' WHERE username = 'admin' AND role = 'admin'`); err != nil {
+			return err
+		}
+	}
+	return SetMeta(db, seedAdminKey, "1")
 }
 
 // TokenVersion 返回用户的当前令牌版本（不存在时返回 0）。

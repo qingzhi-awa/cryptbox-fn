@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"mime"
+	"net"
 	"net/smtp"
 	"strconv"
 	"strings"
@@ -27,9 +29,16 @@ const smtpEncPrefix = "enc:"
 const MaskedSecret = "******"
 
 // EncryptSMTPPassword 用服务端静态密钥加密 SMTP 口令（存库时带 enc: 前缀）。
+//
+// 幂等：入参已带 enc: 前缀时原样返回。这防止「导入一份内部保留密文的配置」时把密文
+// 二次加密，导致解密后得到字面量 "enc:..." 而 SMTP 静默失效（与 MigrateSMTPPassword
+// 的幂等语义保持一致）。
 func EncryptSMTPPassword(encKey []byte, plain string) (string, error) {
 	if plain == "" {
 		return "", nil
+	}
+	if strings.HasPrefix(plain, smtpEncPrefix) {
+		return plain, nil
 	}
 	if len(encKey) == 0 {
 		return "", errors.New("服务端加密密钥未就绪，拒绝以明文保存 SMTP 口令")
@@ -206,61 +215,155 @@ func sendMail(database *sql.DB, encKey []byte, to, subject, contentType, body st
 	return sendMailWithConfig(LoadSMTPConfig(database, encKey), to, subject, contentType, body)
 }
 
+// smtpTimeout 建连与单次写读的截止时间：避免出站 SMTP 端口被防火墙静默丢弃时
+// 连接无限挂起（安装向导会卡在 -test-smtp，用户表现为"发送不了邮件"）。
+const smtpTimeout = 20 * time.Second
+
+// sanitizeHeader 清洗会被写入邮件头的字段：去掉 CR/LF，防止头部注入，
+// 同时避免收件人/主题里的换行破坏报文结构。
+func sanitizeHeader(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	return strings.TrimSpace(s)
+}
+
+// encodeHeaderValue 对含非 ASCII 的头部值做 RFC 2047 编码。
+// 中文主题裸传会被部分 SMTP 服务器拒收（550）或客户端显示乱码。
+func encodeHeaderValue(s string) string {
+	ascii := true
+	for _, r := range s {
+		if r > 0x7f {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return s
+	}
+	return mime.BEncoding.Encode("UTF-8", s)
+}
+
+// encodeBodyBase64 把正文按 RFC 2045 base64 编码（每行 76 字符），
+// 保证中文/HTML 正文在只支持 7bit 的服务器上也能无损投递。
+func encodeBodyBase64(body string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(body))
+	var b strings.Builder
+	for len(enc) > 76 {
+		b.WriteString(enc[:76])
+		b.WriteString("\r\n")
+		enc = enc[76:]
+	}
+	b.WriteString(enc)
+	return b.String()
+}
+
+// buildMessage 组装 RFC 5322 报文：补齐 Date/Message-ID，编码主题与正文。
+func buildMessage(from, to, subject, contentType, body string) []byte {
+	from = sanitizeHeader(from)
+	to = sanitizeHeader(to)
+	subject = encodeHeaderValue(sanitizeHeader(subject))
+	contentType = sanitizeHeader(contentType)
+	if contentType == "" {
+		contentType = "text/plain; charset=UTF-8"
+	}
+	mid := make([]byte, 16)
+	_, _ = rand.Read(mid)
+	domain := "cryptbox.local"
+	if i := strings.LastIndex(from, "@"); i >= 0 && i+1 < len(from) {
+		domain = from[i+1:]
+	}
+	hdrs := "From: " + from + "\r\n" +
+		"To: " + to + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"Date: " + time.Now().Format(time.RFC1123Z) + "\r\n" +
+		"Message-ID: <" + hex.EncodeToString(mid) + "@" + domain + ">\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: " + contentType + "\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"\r\n" + encodeBodyBase64(body)
+	return []byte(hdrs)
+}
+
 // sendMailWithConfig 使用给定的 SMTP 配置发送邮件。
+// 支持两种加密模式：隐式 TLS（SSL=true，通常 465）与 STARTTLS（SSL=false，通常 587）。
 func sendMailWithConfig(cfg SMTPConfig, to, subject, contentType, body string) error {
 	if cfg.Host == "" || cfg.Port == 0 {
-		return errors.New("SMTP 未配置")
+		return errors.New("SMTP 未配置（缺少服务器地址或端口）")
 	}
 	from := cfg.From
 	if from == "" {
 		from = cfg.Username
 	}
-	msg := []byte("From: " + from + "\r\n" +
-		"To: " + to + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: " + contentType + "\r\n" +
-		"\r\n" + body)
-
-	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
-	var auth smtp.Auth
-	if cfg.Username != "" {
-		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	if from == "" {
+		return errors.New("SMTP 发件人地址为空")
 	}
+	// 需要认证却拿不到口令：多为口令解密失败或未填写。显式报错，避免退化成
+	// "认证失败"这类难以定位的模糊错误。
+	if cfg.Username != "" && cfg.Password == "" {
+		return errors.New("SMTP 口令为空或解密失败，请在系统设置中重新填写邮箱授权码")
+	}
+
+	msg := buildMessage(from, to, subject, contentType, body)
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	dialer := &net.Dialer{Timeout: smtpTimeout}
+
+	var conn net.Conn
+	var err error
 	if cfg.SSL {
-		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.Host})
-		if err != nil {
-			return err
-		}
-		c, err := smtp.NewClient(conn, cfg.Host)
-		if err != nil {
-			return err
-		}
-		defer c.Close()
-		if auth != nil {
-			if err := c.Auth(auth); err != nil {
-				return err
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			ServerName: cfg.Host,
+			MinVersion: tls.VersionTLS12,
+		})
+	} else {
+		conn, err = dialer.Dial("tcp", addr)
+	}
+	if err != nil {
+		return fmt.Errorf("连接 SMTP 服务器 %s 失败: %w", addr, err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(smtpTimeout))
+
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("SMTP 握手失败: %w", err)
+	}
+	defer c.Close()
+
+	// 非隐式 TLS：服务器提供 STARTTLS 时强制升级（587 端口的标准做法），
+	// 既保证凭据加密传输，也让 smtp.PlainAuth 能正常发送。
+	if !cfg.SSL {
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			if err := c.StartTLS(&tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+				return fmt.Errorf("STARTTLS 升级失败: %w", err)
 			}
 		}
-		if err := c.Mail(from); err != nil {
-			return err
-		}
-		if err := c.Rcpt(to); err != nil {
-			return err
-		}
-		w, err := c.Data()
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(msg); err != nil {
-			return err
-		}
-		if err := w.Close(); err != nil {
-			return err
-		}
-		return c.Quit()
 	}
-	return smtp.SendMail(addr, auth, from, []string{to}, msg)
+
+	if cfg.Username != "" {
+		if ok, _ := c.Extension("AUTH"); !ok {
+			return errors.New("SMTP 服务器不支持 AUTH 认证")
+		}
+		if err := c.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
+			return fmt.Errorf("SMTP 认证失败（请确认授权码/发件人与账号一致）: %w", err)
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("MAIL FROM 被拒绝: %w", err)
+	}
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("RCPT TO 被拒绝: %w", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("DATA 被拒绝: %w", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 // TestSMTP 使用显式 SMTP 参数发送一封测试邮件（供安装向导校验 SMTP 配置）。
@@ -389,9 +492,13 @@ func SendVerifyCode(database *sql.DB, encKey []byte, email, purpose string) erro
 	}
 	subject := "密匣验证码"
 	body := "您的验证码是：" + code + "，15 分钟内有效。"
-	if purpose == "reset" {
+	switch purpose {
+	case "reset":
 		subject = "密匣密码重置验证码"
 		body = "您的密码重置验证码是：" + code + "，15 分钟内有效。"
+	case "bind_email":
+		subject = "密匣邮箱验证码"
+		body = "您正在为账号绑定此邮箱，验证码是：" + code + "，15 分钟内有效。若非本人操作请忽略。"
 	}
 	return SendEmail(database, encKey, email, subject, body)
 }

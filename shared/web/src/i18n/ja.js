@@ -24,6 +24,7 @@ export default {
     save: '保存'
   },
   users: {
+    legacyPending: '{n} 件のアカウントにサーバー側で復号可能な旧データが残っています（移行未完了）。バージョン {v} までにクライアントで移行を完了してください。',
     add: 'ユーザー追加',
     username: 'ユーザー名',
     email: 'メールアドレス',
@@ -47,6 +48,12 @@ export default {
     currentPassword: '現在のパスワード',
     newPassword: '新しいパスワード',
     changeAvatar: 'アイコン変更',
+    emailCode: 'メール確認コード',
+    emailCodeRequired: '新しいメールアドレスに送信されたコードを入力してください',
+    currentPasswordRequired: '現在のパスワードを入力してください',
+    sendCode: 'コードを送信',
+    sending: '送信中…',
+    codeSent: '確認コードを送信しました。受信トレイをご確認ください',
     edit: 'プロフィール編集'
   },
   msg: {

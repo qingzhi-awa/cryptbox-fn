@@ -24,7 +24,9 @@ if [ -n "${SMTP_VENDOR}" ] && [ -n "${SMTP_USERNAME}" ]; then
         BIN="${TRIM_APPDEST}/cryptbox-server"
         [ -x "${BIN}" ] || BIN="${TRIM_APPDEST}/cryptbox-server-arm64"
         if [ -x "${BIN}" ]; then
-            if ! "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${wizard_smtp_password:-}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
+            # R8-05：SMTP 口令经标准输入传入，不落命令行参数（避免同机 ps 可见）。
+            if ! printf '%s\n' "${wizard_smtp_password:-}" \
+                | "${BIN}" -test-smtp "${SMTP_HOST}" "${SMTP_PORT}" "${SMTP_USERNAME}" "${SMTP_SSL}" "${SMTP_USERNAME}"; then
                 echo "SMTP 测试邮件发送失败，请返回上一步检查配置" >&2
                 exit 1
             fi
