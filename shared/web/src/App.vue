@@ -2296,7 +2296,7 @@ button:disabled {
   gap: 16px;
 }
 .sidebar {
-  width: 180px;
+  width: 152px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -2326,7 +2326,8 @@ button:disabled {
   border-top: 1px solid #e5e7eb;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 16px;
+  padding-left: 12px;
 }
 /* 用 .sidebar button.theme-toggle 提高优先级，避免被 .sidebar button 的 width:100% 覆盖 */
 .sidebar button.theme-toggle {
