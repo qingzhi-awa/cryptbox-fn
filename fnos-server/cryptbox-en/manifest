@@ -1,5 +1,5 @@
 appname               = cryptbox
-version               = 0.2.36
+version               = 0.2.3
 display_name          = CryPtBox
 desc                  = CryPtBox is a local-first, cross-platform password manager with optional cloud sync. The client and server are both open source.
 platform              = arm
@@ -12,4 +12,4 @@ service_port          = 5201
 checkport             = true
 desktop_uidir         = ui
 desktop_applaunchname = cryptbox.Application
-changelog             = ✅ 1. Permissions & session\n[Roles] Only a superadmin can create admins or grant the admin role, closing a privilege-escalation path\n[Session] The session cookie's Secure flag is now decided by the real protocol behind a reverse proxy/gateway\n✅ 2. Migration & notices\n[Migration] Added an admin endpoint listing accounts that still hold server-decryptable legacy entries; the plaintext migration API is planned for removal in 0.3.0, with a notice banner on the user-management page\n✅ 3. Hardening\n[Web] The admin console CSP no longer allows unsafe-eval, removing the code-execution surface under script injection\n[Rate limit] Fixed a setup-endpoint limiter key table that was never periodically cleaned
+changelog             = ✅ 1. Sign-in\n[Login] Improved the sign-in experience\n[Password] Fixed inaccurate wrong-password messages; prompts are now more precise\n[User] Fixed user info failing to load after sign-in\n✅ 2. Sync fixes\n[Sync] Fixed the sync button not working in some cases\n[Sync] Improved sync logic\n✅ 3. Security\n[Security] Added multiple layers of security mechanisms\n[Security] Tightened file permissions and enhanced masking of sensitive fields\n[Gateway] The embedded entry now goes through the unified gateway for better access stability\n[Logs] Added API access logs for easier troubleshooting\n✅ 4. UI improvements\n[Display] Fixed page issues in some scenarios\n[Template] Improved the display of template content and names\n[Language] Fixed language display issues in some cases\n[Recycle bin] Improved deletion logic with soft delete and recovery of accidental deletions\n[Recycle bin] Improved user preference settings
