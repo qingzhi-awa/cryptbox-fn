@@ -6,7 +6,7 @@
             "type": "iframe",
             "protocol": "http",
             "port": "5201",
-            "url": "/?v=0.2.29",
+            "url": "/?v=0.2.3",
             "allUsers": true,
             "gatewaySocket": "app.sock",
             "gatewayPrefix": "/app/cryptbox"
